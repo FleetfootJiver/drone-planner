@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drone Route Planner</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; }
+#header { background: #1a2a3a; color: white; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+#header h1 { font-size: 15px; font-weight: 500; }
+#header span { font-size: 12px; color: #8aa; margin-left: auto; }
+#toolbar { display: flex; align-items: center; gap: 6px 8px; padding: 8px 12px; background: white; border-bottom: 1px solid #e0e0e0; flex-wrap: wrap; row-gap: 6px; }
+.tb-btn { font-size: 12px; padding: 5px 11px; border: 1px solid #ccc; border-radius: 6px; background: white; color: #333; cursor: pointer; }
+.tb-btn:hover { background: #f0f0f0; }
+.tb-btn.active { background: #1a6fa8; color: white; border-color: #1a6fa8; }
+.tb-btn.danger { border-color: #c94040; color: #c94040; }
+.tb-btn.danger:hover { background: #fdf0f0; }
+#rule-toggle { display: flex; gap: 4px; }
+#wp-count { font-size: 12px; color: #666; }
+#fmt-select { font-size: 12px; padding: 5px 6px; border: 1px solid #ccc; border-radius: 6px; background: white; color: #333; cursor: pointer; }
+#load-input { display: none; }
+#map { width: 100%; height: 380px; }
+#status-bar { padding: 5px 12px; font-size: 12px; color: #555; background: #f0f0ee; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; min-height: 26px; }
+#chart-section { background: white; padding: 12px 12px 4px; }
+#chart-section canvas { width: 100% !important; height: 240px !important; }
+#legend { display: flex; gap: 18px; padding: 8px 12px 10px; background: white; flex-wrap: wrap; border-bottom: 1px solid #e8e8e8; }
+.leg-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; }
+.leg-line { width: 28px; height: 2px; }
+.leg-line.dashed { background: repeating-linear-gradient(90deg, currentColor 0, currentColor 5px, transparent 5px, transparent 9px); }
+#info-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; padding: 10px 12px 14px; background: #f5f5f3; }
+.i-card { background: white; border-radius: 8px; border: 1px solid #e8e8e8; padding: 9px 12px; }
+.i-card .label { font-size: 11px; color: #888; margin-bottom: 3px; }
+.i-card .value { font-size: 18px; font-weight: 500; color: #1a1a1a; }
+.i-card .unit { font-size: 11px; color: #aaa; }
+#note { padding: 8px 12px; font-size: 11px; color: #888; background: #f5f5f3; border-top: 1px solid #e8e8e8; line-height: 1.5; }
+/* Layout — default portrait: map left 60%, chart right 40% */
+#main-layout { display: flex; flex-direction: row; height: calc(100vh - 84px); }
+#left-pane { width: 60%; border-right: 1px solid #ddd; display: flex; flex-direction: column; flex-shrink: 0; }
+#right-pane { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+#map { flex: 1; height: auto; min-height: 200px; }
+#status-bar { flex-shrink: 0; }
+#chart-section { flex: 1; padding: 8px; }
+#chart-section canvas { width: 100% !important; height: 100% !important; min-height: 180px; }
+
+/* Landscape: map left 50%, chart right 50% */
+#main-layout.landscape #left-pane { width: 50%; }
+#main-layout.landscape #right-pane { width: 50%; }
+
+/* Stacked mode (phone portrait) */
+#main-layout.stacked { flex-direction: column; height: auto; }
+#main-layout.stacked #left-pane { width: 100%; border-right: none; border-bottom: 1px solid #ddd; }
+#main-layout.stacked #left-pane #map { height: 340px; flex: none; }
+#main-layout.stacked #right-pane { width: 100%; }
+#main-layout.stacked #chart-section canvas { height: 220px !important; }
+
+/* Modal overlay */
+#modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+}
+#modal-overlay.visible { display: flex; }
+#modal-box {
+  background: white;
+  border-radius: 10px;
+  padding: 28px 32px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+  text-align: center;
+  min-width: 260px;
+}
+#modal-box .modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a2a3a;
+  margin-bottom: 10px;
+}
+#modal-box .modal-msg {
+  font-size: 13px;
+  color: #555;
+  line-height: 1.5;
+}
+.modal-spinner {
+  width: 32px; height: 32px;
+  border: 3px solid #e0e0e0;
+  border-top-color: #1a6fa8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 12px auto 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>&#x2708; Drone Route Terrain Planner</h1>
+  <span>UK Concept Demonstrator</span>
+</div>
+<div id="toolbar">
+  <button class="tb-btn active" id="btn-add">+ Add waypoint</button>
+  <button class="tb-btn danger" id="btn-clear">Clear all</button>
+  <button class="tb-btn" id="btn-profile">&#x25B6; Calculate profile</button>
+  <span id="wp-count">0 waypoints</span>
+  <select id="fmt-select">
+    <option value="csv">CSV</option>
+    <option value="kml">KML</option>
+    <option value="geojson">GeoJSON</option>
+  </select>
+  <button class="tb-btn" id="btn-save">&#x2913; Save route</button>
+  <button class="tb-btn" id="btn-load">&#x2912; Load route</button>
+  <button class="tb-btn" id="btn-png-map">&#x1F5FA; Map PNG</button>
+  <button class="tb-btn" id="btn-png-profile">&#x1F4C8; Profile PNG</button>
+  <button class="tb-btn" id="btn-png-both">&#x1F4F7; Both PNG</button>
+  <input type="file" id="load-input" accept=".csv,.kml,.geojson,.json">
+  <div style="width:1px;background:#ddd;align-self:stretch;margin:2px 2px;"></div>
+  <div id="rule-toggle">
+    <button class="tb-btn active" id="btn-ruleA">Rule A</button>
+    <button class="tb-btn active" id="btn-ruleB">Rule B</button>
+  </div>
+  <button class="tb-btn" id="btn-layout" title="Toggle side-by-side layout">&#x25ED; Layout</button>
+</div>
+<div id="main-layout">
+  <div id="left-pane">
+    <div id="map"></div>
+    <div id="status-bar">Click the map to place waypoints, then press Calculate profile.</div>
+  </div>
+  <div id="right-pane">
+    <div id="chart-section"><canvas id="profile-chart"></canvas></div>
+    <div id="legend">
+      <div class="leg-item"><div class="leg-line" style="background:#7c5c2e"></div>DTM (bare earth)</div>
+      <div class="leg-item"><div class="leg-line" style="background:#2a7a3b"></div>DSM (buildings and vegetation)</div>
+      <div class="leg-item"><div class="leg-line dashed" style="color:#c94040"></div>Rule A ceiling (DTM+120m)</div>
+      <div class="leg-item"><div class="leg-line dashed" style="color:#1a6fa8"></div>Rule B (120m from nearest terrain)</div>
+    </div>
+    <div id="info-cards">
+      <div class="i-card"><div class="label">Route length</div><div class="value" id="ic-dist">&mdash;</div><div class="unit">metres</div></div>
+      <div class="i-card"><div class="label">Min Rule A ceiling</div><div class="value" id="ic-ruleA">&mdash;</div><div class="unit">m ASL</div></div>
+      <div class="i-card"><div class="label">Min Rule B ceiling</div><div class="value" id="ic-ruleB">&mdash;</div><div class="unit">m ASL</div></div>
+      <div class="i-card"><div class="label">Max terrain height</div><div class="value" id="ic-maxterrain">&mdash;</div><div class="unit">m ASL</div></div>
+      <div class="i-card"><div class="label">Waypoints</div><div class="value" id="ic-wps">0</div><div class="unit">points</div></div>
+    </div>
+    <div id="note">DTM and DSM data from DEFRA Environment Agency via WCS. Coverage: England and Wales. Drag markers to reposition waypoints. Double-click a marker to delete it.</div>
+  </div>
+</div>
+<script>
+const SAMPLE_SPACING = 1;
+const RULE_RADIUS = 120;
+
+// Backend API — local dev server. When deployed to Render.com this will be
+// the Render service URL e.g. 'https://drone-planner-api.onrender.com'
+const isLocal = ['localhost','127.0.0.1'].includes(window.location.hostname);
+// Use the same hostname the browser used to reach the frontend,
+// so localhost:8080 -> localhost:8000 and 127.0.0.1:8080 -> 127.0.0.1:8000
+const API_BASE = isLocal
+  ? window.location.protocol + '//' + window.location.hostname + ':8000'
+  : '';  // '' = same origin when frontend and backend share a domain on Render
+
+document.addEventListener('DOMContentLoaded', function() {
+const canvasRenderer = L.canvas();
+const map = L.map('map', { preferCanvas: true }).setView([51.5, -1.8], 10);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+  subdomains: 'abcd',
+  maxZoom: 19
+}).addTo(map);
+
+let waypoints = [], markers = [], routeLine = null, profileChart = null;
+let showRuleA = true, showRuleB = true, adding = true;
+
+function haversine(a, b) {
+  const R = 6371000;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lng - a.lng) * Math.PI / 180;
+  const s = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.asin(Math.sqrt(s));
+}
+
+function interpolatePoints(wps, spacing) {
+  if (wps.length < 2) return [];
+  const pts = [];
+  for (let i = 0; i < wps.length - 1; i++) {
+    const a = wps[i], b = wps[i+1];
+    const n = Math.max(1, Math.round(haversine(a, b) / spacing));
+    for (let j = 0; j < n; j++) {
+      const t = j / n;
+      pts.push({ lat: a.lat + (b.lat - a.lat)*t, lng: a.lng + (b.lng - a.lng)*t });
+    }
+  }
+  pts.push(wps[wps.length - 1]);
+  return pts;
+}
+
+function totalRouteLength(wps) {
+  let d = 0;
+  for (let i = 1; i < wps.length; i++) d += haversine(wps[i-1], wps[i]);
+  return d;
+}
+
+let _currentAbort = null;
+
+async function fetchProfile(waypoints, signal) {
+  // Show WCS modal after 400ms — fast cached responses complete before it appears
+  const modalTimer = setTimeout(() => {
+    showModal('Downloading terrain data',
+      'Requesting terrain from DEFRA WCS — please wait...');
+  }, 400);
+
+  try {
+    const resp = await fetch(API_BASE + '/api/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) }),
+      signal: signal
+    });
+    clearTimeout(modalTimer);
+    hideModal();
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || resp.statusText);
+    }
+    return resp.json();
+  } catch(err) {
+    clearTimeout(modalTimer);
+    hideModal();
+    throw err;
+  }
+}
+
+function ruleACeiling(dtm) { return dtm.map(v => v + 120); }
+
+function ruleBCeiling(dtm, dx) {
+  const n = dtm.length, r = RULE_RADIUS, r2 = r*r, halfW = r - 1;
+  const ceiling = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let maxVal = 0;
+    const lo = Math.max(0, i - halfW), hi = Math.min(n-1, i + halfW);
+    for (let j = lo; j <= hi; j++) {
+      const d = Math.abs(j - i) * dx;
+      const arc = dtm[j] + Math.sqrt(r2 - d*d);
+      if (arc > maxVal) maxVal = arc;
+    }
+    ceiling[i] = maxVal;
+  }
+  return ceiling;
+}
+
+function setStatus(msg) { document.getElementById('status-bar').textContent = msg; }
+
+function updateMarkers() {
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  waypoints.forEach((wp, i) => {
+    const icon = L.divIcon({
+      className: '',
+      html: '<div style="background:#1a6fa8;color:white;border-radius:50%;width:26px;height:26px;'
+          + 'display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;'
+          + 'border:2px solid white;box-shadow:0 1px 5px rgba(0,0,0,0.35)">' + (i+1) + '</div>',
+      iconSize: [26,26], iconAnchor: [13,13]
+    });
+    const m = L.marker([wp.lat, wp.lng], { icon, draggable: true }).addTo(map);
+    m.on('dragend', e => { waypoints[i] = e.target.getLatLng(); updateRoute(); });
+    m.on('dblclick', () => { waypoints.splice(i,1); updateMarkers(); updateRoute(); });
+    m.bindTooltip('WP' + (i+1) + '  ' + wp.lat.toFixed(5) + ', ' + wp.lng.toFixed(5),
+      { direction: 'top', offset: [0,-14] });
+    markers.push(m);
+  });
+  document.getElementById('wp-count').textContent = waypoints.length + ' waypoint' + (waypoints.length !== 1 ? 's' : '');
+  document.getElementById('ic-wps').textContent = waypoints.length;
+}
+
+function updateRoute() {
+  if (routeLine) map.removeLayer(routeLine);
+  if (waypoints.length >= 2) {
+    routeLine = L.polyline(waypoints.map(w => [w.lat, w.lng]),
+      { color: '#1a6fa8', weight: 2, dashArray: '6 4', opacity: 0.8, renderer: canvasRenderer }).addTo(map);
+    document.getElementById('ic-dist').textContent = Math.round(totalRouteLength(waypoints));
+  } else {
+    document.getElementById('ic-dist').textContent = '—';
+  }
+  updateMarkers();
+}
+
+map.on('click', e => {
+  if (!adding) return;
+  waypoints.push(e.latlng);
+  updateRoute();
+  setStatus('Waypoint ' + waypoints.length + ' placed. '
+    + (waypoints.length >= 2 ? 'Press Calculate profile to fetch terrain.' : 'Add at least one more.'));
+});
+
+document.getElementById('btn-modal-cancel').onclick = function() {
+  if (_currentAbort) {
+    _currentAbort.abort();
+  }
+};
+
+document.getElementById('btn-add').onclick = function() {
+  adding = !adding;
+  this.classList.toggle('active', adding);
+  this.textContent = adding ? '+ Add waypoint' : '— Paused';
+  setStatus(adding ? 'Click map to place waypoints.' : 'Placement paused.');
+};
+
+document.getElementById('btn-clear').onclick = () => {
+  waypoints = [];
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  if (profileChart) { profileChart.destroy(); profileChart = null; }
+  ['ic-dist','ic-ruleA','ic-ruleB','ic-maxterrain'].forEach(id => document.getElementById(id).textContent = '—');
+  document.getElementById('ic-wps').textContent = '0';
+  document.getElementById('wp-count').textContent = '0 waypoints';
+  cachedBbox = null;
+  setStatus('Cleared. Click the map to place new waypoints.');
+};
+
+document.getElementById('btn-ruleA').onclick = function() {
+  showRuleA = !showRuleA;
+  this.classList.toggle('active', showRuleA);
+  if (profileChart) { profileChart.data.datasets[2].hidden = !showRuleA; profileChart.update(); }
+};
+
+document.getElementById('btn-ruleB').onclick = function() {
+  showRuleB = !showRuleB;
+  this.classList.toggle('active', showRuleB);
+  if (profileChart) { profileChart.data.datasets[3].hidden = !showRuleB; profileChart.update(); }
+};
+
+document.getElementById('btn-profile').onclick = () => runProfile();
+
+// --- Save / Load ---
+
+function downloadFile(filename, text, mime) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function timestamp() {
+  return new Date().toISOString().slice(0,16).replace('T','-').replace(':','');
+}
+
+function saveCSV() {
+  if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
+  const rows = ['index,latitude,longitude'];
+  waypoints.forEach((wp, i) => rows.push((i+1) + ',' + wp.lat.toFixed(7) + ',' + wp.lng.toFixed(7)));
+  downloadFile('route-' + timestamp() + '.csv', rows.join('\n'), 'text/csv');
+  setStatus('Saved ' + waypoints.length + ' waypoints as CSV.');
+}
+
+function saveKML() {
+  if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
+  const pm = waypoints.map((wp, i) =>
+    '  <Placemark><name>WP' + (i+1) + '</name><Point><coordinates>'
+    + wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0</coordinates></Point></Placemark>'
+  ).join('\n');
+  const coords = waypoints.map(wp => wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0').join(' ');
+  const kml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Drone Route</name>',
+    pm,
+    '  <Placemark><name>Route</name><LineString><tessellate>1</tessellate>',
+    '    <coordinates>' + coords + '</coordinates></LineString></Placemark>',
+    '</Document></kml>'
+  ].join('\n');
+  downloadFile('route-' + timestamp() + '.kml', kml, 'application/vnd.google-earth.kml+xml');
+  setStatus('Saved ' + waypoints.length + ' waypoints as KML.');
+}
+
+function saveGeoJSON() {
+  if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
+  const features = waypoints.map((wp, i) => ({
+    type: 'Feature', properties: { index: i+1 },
+    geometry: { type: 'Point', coordinates: [wp.lng, wp.lat] }
+  }));
+  features.push({ type: 'Feature', properties: { name: 'Route' },
+    geometry: { type: 'LineString', coordinates: waypoints.map(wp => [wp.lng, wp.lat]) }
+  });
+  downloadFile('route-' + timestamp() + '.geojson',
+    JSON.stringify({ type: 'FeatureCollection', features }, null, 2), 'application/geo+json');
+  setStatus('Saved ' + waypoints.length + ' waypoints as GeoJSON.');
+}
+
+document.getElementById('btn-save').onclick = () => {
+  const fmt = document.getElementById('fmt-select').value;
+  if (fmt === 'csv') saveCSV();
+  else if (fmt === 'kml') saveKML();
+  else saveGeoJSON();
+};
+
+document.getElementById('btn-load').onclick = () => document.getElementById('load-input').click();
+
+document.getElementById('load-input').onchange = function() {
+  const file = this.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const text = e.target.result;
+    let loaded = [];
+    try {
+      if (file.name.endsWith('.csv')) {
+        text.trim().split('\n').slice(1).forEach(line => {
+          const p = line.split(',');
+          if (p.length >= 3) {
+            const lat = parseFloat(p[1]), lng = parseFloat(p[2]);
+            if (!isNaN(lat) && !isNaN(lng)) loaded.push({ lat, lng });
+          }
+        });
+      } else if (file.name.endsWith('.kml')) {
+        const doc = new DOMParser().parseFromString(text, 'application/xml');
+        doc.querySelectorAll('Placemark').forEach(pm => {
+          const pt = pm.querySelector('Point coordinates');
+          if (pt) {
+            const p = pt.textContent.trim().split(',');
+            const lng = parseFloat(p[0]), lat = parseFloat(p[1]);
+            if (!isNaN(lat) && !isNaN(lng)) loaded.push({ lat, lng });
+          }
+        });
+      } else {
+        (JSON.parse(text).features || []).forEach(f => {
+          if (f.geometry && f.geometry.type === 'Point') {
+            const [lng, lat] = f.geometry.coordinates;
+            loaded.push({ lat, lng });
+          }
+        });
+      }
+    } catch(err) { setStatus('Error reading file: ' + err.message); return; }
+    if (!loaded.length) { setStatus('No valid waypoints found in file.'); return; }
+    waypoints = loaded.map(p => L.latLng(p.lat, p.lng));
+    updateRoute();
+    if (markers.length > 0) map.fitBounds(L.featureGroup(markers).getBounds(), { padding: [40,40] });
+    setStatus('Loaded ' + waypoints.length + ' waypoints from ' + file.name + '. Fetching profile...');
+    // Use setTimeout to ensure DOMContentLoaded handlers are fully registered
+    setTimeout(() => runProfile(), 100);
+  };
+  reader.readAsText(file);
+  this.value = '';
+};
+
+// --- Modal helpers ---
+function showModal(title, msg) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-msg').textContent = msg;
+  document.getElementById('modal-overlay').classList.add('visible');
+}
+function hideModal() {
+  document.getElementById('modal-overlay').classList.remove('visible');
+}
+
+// --- WCS terrain cache state ---
+// cachedBbox: { minLat, maxLat, minLng, maxLng } of last downloaded area, or null
+// When WCS backend is added, replace fetchElevations() with a WCS call and
+// populate cachedBbox. The needsNewDownload() check below is already wired in.
+let cachedBbox = null;
+const WCS_BUFFER_M = 500;       // metres added each side when downloading
+const WCS_EDGE_MARGIN_M = 150;  // re-download if waypoint within this of edge
+
+// Convert metres offset to approximate degrees (good enough at UK latitudes)
+function mToDegreesLat(m) { return m / 111320; }
+function mToDegreesLng(m, lat) { return m / (111320 * Math.cos(lat * Math.PI / 180)); }
+
+// Build a bounding box covering all waypoints plus buffer
+function routeBbox(wps, bufferM) {
+  const lats = wps.map(w => w.lat);
+  const lngs = wps.map(w => w.lng);
+  const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+  const bufLat = mToDegreesLat(bufferM);
+  const bufLng = mToDegreesLng(bufferM, midLat);
+  return {
+    minLat: Math.min(...lats) - bufLat,
+    maxLat: Math.max(...lats) + bufLat,
+    minLng: Math.min(...lngs) - bufLng,
+    maxLng: Math.max(...lngs) + bufLng
+  };
+}
+
+// Returns true if any waypoint is within marginM of any edge of the cached bbox
+function needsNewDownload(wps, bbox, marginM) {
+  const midLat = (bbox.minLat + bbox.maxLat) / 2;
+  const mLat = mToDegreesLat(marginM);
+  const mLng = mToDegreesLng(marginM, midLat);
+  return wps.some(wp =>
+    wp.lat < bbox.minLat + mLat ||
+    wp.lat > bbox.maxLat - mLat ||
+    wp.lng < bbox.minLng + mLng ||
+    wp.lng > bbox.maxLng - mLng
+  );
+}
+
+// --- Profile ---
+
+let _profileRunning = false;
+async function runProfile() {
+  if (_profileRunning) { setStatus('Profile calculation already in progress.'); return; }
+  if (waypoints.length < 2) { setStatus('Please place at least 2 waypoints first.'); return; }
+  _profileRunning = true;
+
+  // Update cached bbox tracker
+  cachedBbox = routeBbox(waypoints, WCS_BUFFER_M);
+
+  // Cancel any pending keepalive
+  clearTimeout(_keepaliveTimer);
+  _keepaliveTimer = null;
+
+  setStatus('Contacting backend...');
+  const t0 = performance.now();
+
+  _currentAbort = new AbortController();
+  document.getElementById('btn-modal-cancel').style.display = 'inline-block';
+
+  let profile;
+  try {
+    profile = await fetchProfile(waypoints, _currentAbort.signal);
+  } catch(err) {
+    if (err.name === 'AbortError') {
+      setStatus('Profile calculation cancelled.');
+    } else {
+      setStatus('Error: ' + err.message);
+    }
+    return;
+  } finally {
+    hideModal();
+    document.getElementById('btn-modal-cancel').style.display = 'none';
+    _currentAbort = null;
+    _profileRunning = false;
+  }
+
+  const t1 = performance.now();
+  const fetchSec = ((t1 - t0) / 1000).toFixed(1);
+
+  showModal('Calculating profile', 'Computing terrain profile and altitude ceilings...');
+  await new Promise(r => setTimeout(r, 30));
+
+  const dtm = profile.dtm;
+  const dsm = profile.dsm;
+  const distances = profile.distances_m.map(d => Math.round(d));
+
+  // Rule A and B computed client-side from DTM
+  // Use actual point spacing from backend distances
+  const dx = profile.total_length_m / (profile.points - 1);
+  const ruleA = ruleACeiling(dtm.map(v => v ?? 0));
+  const ruleB = ruleBCeiling(dtm.map(v => v ?? 0), dx);
+
+  document.getElementById('ic-ruleA').textContent = Math.round(Math.min(...ruleA));
+  document.getElementById('ic-ruleB').textContent = Math.round(Math.min(...ruleB));
+  document.getElementById('ic-maxterrain').textContent = Math.round(Math.max(...dtm.filter(v => v !== null)));
+  document.getElementById('ic-dist').textContent = Math.round(profile.total_length_m);
+
+  const allVals = [...dtm, ...dsm, ...ruleA, ...ruleB].filter(v => v !== null);
+  const yMin = Math.floor(Math.min(...allVals)/10)*10 - 10;
+  const yMax = Math.ceil(Math.max(...allVals)/10)*10 + 20;
+
+  if (profileChart) profileChart.destroy();
+  profileChart = new Chart(document.getElementById('profile-chart').getContext('2d'), {
+    type: 'line',
+    data: { labels: distances, datasets: [
+      { label: 'DTM', data: dtm, borderColor: '#7c5c2e', borderWidth: 2, pointRadius: 0,
+        fill: { target: 'origin', above: 'rgba(124,92,46,0.12)' }, tension: 0.3 },
+      { label: 'DSM', data: dsm, borderColor: '#2a7a3b', borderWidth: 1.5,
+        pointRadius: 0, fill: false, tension: 0.2 },
+      { label: 'Rule A (DTM+120m)', data: ruleA, borderColor: '#c94040', borderWidth: 2,
+        borderDash: [7,4], pointRadius: 0, fill: false, tension: 0.3, hidden: !showRuleA },
+      { label: 'Rule B (120m from nearest terrain)', data: ruleB, borderColor: '#1a6fa8', borderWidth: 2,
+        borderDash: [7,4], pointRadius: 0, fill: false, tension: 0.3, hidden: !showRuleB }
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        waypointLines: { waypoints: waypoints, distances: distances,
+                         showRuleA: showRuleA, showRuleB: showRuleB,
+                         ruleA: ruleA, ruleB: ruleB, dsm: dsm, yMin: yMin },
+        tooltip: {
+          backgroundColor: 'rgba(20,20,20,0.82)', titleFont: { size: 11 }, bodyFont: { size: 11 },
+          callbacks: {
+            title: items => 'Distance: ' + items[0].label + 'm',
+            label: item => item.raw !== null
+              ? ' ' + item.dataset.label + ': ' + Math.round(item.raw) + 'm'
+              : ' ' + item.dataset.label + ': no data'
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { font:{size:11}, color:'#888', maxTicksLimit:12,
+              callback: v => distances[v] !== undefined ? distances[v]+'m' : '' },
+             grid: { color:'rgba(0,0,0,0.06)' } },
+        y: { min: yMin, max: yMax,
+             ticks: { font:{size:11}, color:'#888', callback: v => v+'m' },
+             grid: { color:'rgba(0,0,0,0.06)' },
+             title: { display:true, text:'Altitude (m ASL)', font:{size:11}, color:'#888' } }
+      }
+    }
+  });
+
+  hideModal();
+  const t2 = performance.now();
+  const calcSec = ((t2 - t1) / 1000).toFixed(1);
+  const srcLabel = profile.source === 'wcs' ? 'DEFRA WCS' : 'local tiles';
+  const cacheLabel = profile.source === 'wcs' && parseFloat(fetchSec) < 2.0 ? ' (cached)' : '';
+  const dsmMissing = profile.dsm.every(v => v === null);
+  let statusMsg = 'Profile loaded (' + srcLabel + cacheLabel + '): '
+    + profile.points + ' points, '
+    + profile.total_length_m.toFixed(0) + ' m. '
+    + 'Fetch: ' + fetchSec + 's  Calc: ' + calcSec + 's. '
+    + 'Tiles: ' + profile.tiles_used.join(', ') + '.';
+  if (dsmMissing) statusMsg += ' ⚠ DSM unavailable (DEFRA server error) — Rule A/B calculated from DTM only.';
+  else if (profile.warnings.length) statusMsg += ' ⚠ ' + profile.warnings.join(' ');
+  setStatus(statusMsg);
+};
+
+// --- Save PNG helpers ---
+function saveBlobAsPNG(canvas, filename) {
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, 'image/png');
+}
+
+function addHeader(ctx, w, label) {
+  const labelH = 22;
+  ctx.fillStyle = '#1a2a3a';
+  ctx.fillRect(0, 0, w, labelH);
+  ctx.fillStyle = 'white';
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillText(label + '  —  ' + new Date().toLocaleString(), 8, 15);
+  return labelH;
+}
+
+async function captureMap() {
+  return html2canvas(document.getElementById('map'), {
+    useCORS: true, allowTaint: true, logging: false,
+    scale: window.devicePixelRatio || 1
+  });
+}
+
+document.getElementById('btn-png-map').onclick = async () => {
+  setStatus('Rendering map PNG...');
+  const mc = await captureMap();
+  const out = document.createElement('canvas');
+  out.width = mc.width;
+  out.height = mc.height + 22;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#f5f5f3';
+  ctx.fillRect(0, 0, out.width, out.height);
+  const lh = addHeader(ctx, out.width, 'Drone Route — Map');
+  ctx.drawImage(mc, 0, lh);
+  saveBlobAsPNG(out, 'drone-map-' + timestamp() + '.png');
+  setStatus('Map PNG saved.');
+};
+
+document.getElementById('btn-png-profile').onclick = () => {
+  if (!profileChart) { setStatus('Load a profile first.'); return; }
+  const cc = document.getElementById('profile-chart');
+  const out = document.createElement('canvas');
+  out.width = cc.width;
+  out.height = cc.height + 22;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, out.width, out.height);
+  const lh = addHeader(ctx, out.width, 'Drone Route — Terrain Profile');
+  ctx.drawImage(cc, 0, lh);
+  saveBlobAsPNG(out, 'drone-profile-' + timestamp() + '.png');
+  setStatus('Profile PNG saved.');
+};
+
+document.getElementById('btn-png-both').onclick = async () => {
+  if (!profileChart) { setStatus('Load a profile first, or use Map PNG for map only.'); return; }
+  setStatus('Rendering combined PNG...');
+  const mc = await captureMap();
+  const cc = document.getElementById('profile-chart');
+  const labelH = 22;
+  // Side by side: map left, chart right, both scaled to same height
+  const h = mc.height; // use map height as the common row height
+  const scale = h / cc.height;
+  const ccW = Math.round(cc.width * scale); // chart width scaled to match
+  const totalW = mc.width + ccW;
+  const out = document.createElement('canvas');
+  out.width = totalW;
+  out.height = labelH + h;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#f5f5f3';
+  ctx.fillRect(0, 0, totalW, out.height);
+  const lh = addHeader(ctx, totalW, 'Drone Route Terrain Planner');
+  // Map on the left
+  ctx.drawImage(mc, 0, lh);
+  // Chart on the right, scaled to same height as map
+  ctx.fillStyle = 'white';
+  ctx.fillRect(mc.width, lh, ccW, h);
+  ctx.drawImage(cc, 0, 0, cc.width, cc.height, mc.width, lh, ccW, h);
+  saveBlobAsPNG(out, 'drone-route-' + timestamp() + '.png');
+  setStatus('Combined PNG saved.');
+};
+
+// --- Keepalive — reset TTL when user interacts with map ----------------
+let _keepaliveTimer = null;
+function touchSession() {
+  if (!API_BASE || waypoints.length < 2) return;
+  clearTimeout(_keepaliveTimer);
+  _keepaliveTimer = setTimeout(() => {
+    fetch(API_BASE + '/api/keepalive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) })
+    }).catch(() => {}); // silent — keepalive failure is not critical
+  }, 5000); // debounce 5 s
+}
+map.on('click', touchSession);
+// Note: don't use map.on('dragend') as it fires for both map pan
+// and marker drags — keepalive is sent on click only
+
+// --- Waypoint lines Chart.js plugin (registered once at top level) --------
+const waypointLinesPlugin = {
+  id: 'waypointLines',
+  afterDraw(chart) {
+    const opts = chart.options.plugins.waypointLines;
+    if (!opts || !opts.waypoints || opts.waypoints.length < 2) return;
+    const ctx2 = chart.ctx;
+    const xAxis = chart.scales.x;
+    const yAxis = chart.scales.y;
+    const wps = opts.waypoints;
+
+    // Compute cumulative distances to each waypoint
+    let cumDist = 0;
+    const wpDists = [0];
+    for (let i = 1; i < wps.length; i++) {
+      cumDist += haversine(wps[i-1], wps[i]);
+      wpDists.push(Math.round(cumDist));
+    }
+
+    const distArr = opts.distances;
+    wpDists.forEach((wpD, wi) => {
+      let closest = 0, minDiff = Infinity;
+      for (let i = 0; i < distArr.length; i++) {
+        const diff = Math.abs(distArr[i] - wpD);
+        if (diff < minDiff) { minDiff = diff; closest = i; }
+      }
+      const xPx = xAxis.getPixelForValue(closest);
+
+      // Top of line: highest visible ceiling at this point
+      let topVal;
+      if (opts.showRuleB && opts.ruleB && opts.ruleB[closest] != null) {
+        topVal = opts.ruleB[closest];
+      } else if (opts.showRuleA && opts.ruleA && opts.ruleA[closest] != null) {
+        topVal = opts.ruleA[closest];
+      } else if (opts.dsm && opts.dsm[closest] != null) {
+        topVal = opts.dsm[closest];
+      } else {
+        topVal = yAxis.max;
+      }
+      const yTop = yAxis.getPixelForValue(topVal);
+      const yBot = yAxis.getPixelForValue(opts.yMin + 5);
+
+      // Dashed vertical line
+      ctx2.save();
+      ctx2.beginPath();
+      ctx2.setLineDash([4, 3]);
+      ctx2.strokeStyle = 'rgba(26,106,168,0.55)';
+      ctx2.lineWidth = 1.5;
+      ctx2.moveTo(xPx, yTop);
+      ctx2.lineTo(xPx, yBot);
+      ctx2.stroke();
+
+      // Numbered circle at bottom
+      const r = 10;
+      ctx2.setLineDash([]);
+      ctx2.beginPath();
+      ctx2.arc(xPx, yBot + r + 2, r, 0, 2*Math.PI);
+      ctx2.fillStyle = '#1a6fa8';
+      ctx2.fill();
+      ctx2.strokeStyle = 'white';
+      ctx2.lineWidth = 1.5;
+      ctx2.stroke();
+      ctx2.fillStyle = 'white';
+      ctx2.font = 'bold 10px system-ui, sans-serif';
+      ctx2.textAlign = 'center';
+      ctx2.textBaseline = 'middle';
+      ctx2.fillText(String(wi + 1), xPx, yBot + r + 2);
+      ctx2.restore();
+    });
+  }
+};
+Chart.register(waypointLinesPlugin);
+
+// --- Layout toggle: Portrait (60/40) -> Landscape (50/50) -> Stacked ---
+const layoutModes = ['portrait', 'landscape', 'stacked'];
+const layoutLabels = ['◭ Landscape', '◭ Stacked', '◭ Portrait'];
+let layoutIdx = 0;
+document.getElementById('btn-layout').onclick = function() {
+  const layout = document.getElementById('main-layout');
+  layout.classList.remove(layoutModes[layoutIdx]);
+  layoutIdx = (layoutIdx + 1) % layoutModes.length;
+  layout.classList.add(layoutModes[layoutIdx]);
+  this.classList.toggle('active', layoutIdx !== 0);
+  this.textContent = layoutLabels[layoutIdx];
+  setTimeout(() => { map.invalidateSize(); }, 50);
+  if (profileChart) profileChart.resize();
+};
+
+});</script>
+
+<div id="modal-overlay">
+  <div id="modal-box">
+    <div class="modal-title" id="modal-title">Please wait</div>
+    <div class="modal-msg" id="modal-msg"></div>
+    <div class="modal-spinner"></div>
+    <button id="btn-modal-cancel" style="display:none;margin-top:14px;font-size:12px;padding:5px 16px;border:1px solid #c94040;border-radius:6px;background:white;color:#c94040;cursor:pointer;">Cancel</button>
+  </div>
+</div>
+</body>
+</html>
