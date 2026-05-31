@@ -161,7 +161,7 @@ const isLocal = ['localhost','127.0.0.1'].includes(window.location.hostname);
 // so localhost:8080 -> localhost:8000 and 127.0.0.1:8080 -> 127.0.0.1:8000
 const API_BASE = isLocal
   ? window.location.protocol + '//' + window.location.hostname + ':8000'
-  : '';  // '' = same origin when frontend and backend share a domain on Render
+  : 'https://drone-backend-2k0b.onrender.com';  // '' = same origin when frontend and backend share a domain on Render
 
 document.addEventListener('DOMContentLoaded', function() {
 const canvasRenderer = L.canvas();
