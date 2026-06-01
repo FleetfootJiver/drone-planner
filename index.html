@@ -507,7 +507,7 @@ async function runProfile() {
   clearTimeout(_keepaliveTimer);
   _keepaliveTimer = null;
 
-  // ── Step 1: Quick ping — 1000ms timeout to detect cold start ───────────────
+  // ── Step 1: Quick ping — 1000ms timeout to detect if server is already awake
   setStatus('Contacting backend...');
   let serverAwake = false;
   try {
@@ -517,21 +517,26 @@ async function runProfile() {
     serverAwake = false;
   }
 
-  // ── Step 1b: If ping timed out, server is cold — show modal and wait ──────
+  // ── Step 1b: Server is cold — trigger wake and wait for readiness ─────────
   if (!serverAwake) {
     showModal('Server restarting…',
       'The backend is waking from sleep. This may take up to 60 seconds. ' +
       'Press Cancel to abort.');
     document.getElementById('btn-modal-cancel').style.display = 'inline-block';
 
-    // Use a separate AbortController for the wake-wait phase
     _currentAbort = new AbortController();
     const wakeAbort = _currentAbort;
 
+    // Fire a long-running fetch to actually trigger Render to wake the instance.
+    // We don't await it — it runs in the background and will eventually resolve
+    // or be abandoned. Its only purpose is to keep a connection open so Render
+    // registers a real request and starts the container.
+    fetch(API_BASE + '/api/ping').catch(() => {});
+
+    // Poll with short timeouts until server responds or user cancels
     let woke = false;
     const wakeStart = performance.now();
     while (performance.now() - wakeStart < 90000) {
-      // Check if user pressed Cancel
       if (wakeAbort.signal.aborted) break;
       await new Promise(r => setTimeout(r, 3000));
       if (wakeAbort.signal.aborted) break;
