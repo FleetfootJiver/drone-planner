@@ -161,7 +161,7 @@ const isLocal = ['localhost','127.0.0.1'].includes(window.location.hostname);
 // so localhost:8080 -> localhost:8000 and 127.0.0.1:8080 -> 127.0.0.1:8000
 const API_BASE = isLocal
   ? window.location.protocol + '//' + window.location.hostname + ':8000'
-  : '';  // '' = same origin when frontend and backend share a domain on Render
+  : 'https://drone-backend-2k0b.onrender.com';  // '' = same origin when frontend and backend share a domain on Render
 
 document.addEventListener('DOMContentLoaded', function() {
 const canvasRenderer = L.canvas();
@@ -207,17 +207,31 @@ function totalRouteLength(wps) {
 let _currentAbort = null;
 
 async function fetchProfile(waypoints, signal) {
-  const resp = await fetch(API_BASE + '/api/profile', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) }),
-    signal: signal
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-    throw new Error(err.detail || resp.statusText);
+  // Show WCS modal after 400ms — fast cached responses complete before it appears
+  const modalTimer = setTimeout(() => {
+    showModal('Downloading terrain data',
+      'Requesting terrain from DEFRA WCS — please wait...');
+  }, 400);
+
+  try {
+    const resp = await fetch(API_BASE + '/api/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) }),
+      signal: signal
+    });
+    clearTimeout(modalTimer);
+    hideModal();
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || resp.statusText);
+    }
+    return resp.json();
+  } catch(err) {
+    clearTimeout(modalTimer);
+    hideModal();
+    throw err;
   }
-  return resp.json();
 }
 
 function ruleACeiling(dtm) { return dtm.map(v => v + 120); }
@@ -486,90 +500,23 @@ function needsNewDownload(wps, bbox, marginM) {
 // --- Profile ---
 
 let _profileRunning = false;
-// Fetch with timeout — resolves with response or rejects with 'timeout'
-async function fetchWithTimeout(url, options, timeoutMs) {
-  const timeoutAbort = new AbortController();
-  const timer = setTimeout(() => timeoutAbort.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, { ...options, signal: timeoutAbort.signal });
-    return resp;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function runProfile() {
   if (_profileRunning) { setStatus('Profile calculation already in progress.'); return; }
   if (waypoints.length < 2) { setStatus('Please place at least 2 waypoints first.'); return; }
   _profileRunning = true;
 
+  // Update cached bbox tracker
+  cachedBbox = routeBbox(waypoints, WCS_BUFFER_M);
+
   // Cancel any pending keepalive
   clearTimeout(_keepaliveTimer);
   _keepaliveTimer = null;
 
-  // ── Step 1: Ping backend with 100ms timeout to detect cold start ──────────
   setStatus('Contacting backend...');
-  let serverAwake = false;
-  try {
-    const pingResp = await fetchWithTimeout(API_BASE + '/api/ping', {}, 2000);
-    serverAwake = pingResp.ok;
-  } catch(e) {
-    serverAwake = false;
-  }
-
-  if (!serverAwake) {
-    showModal('Server restarting…',
-      'The backend is waking from sleep. This takes up to 60 seconds on first use.');
-    document.getElementById('btn-modal-cancel').style.display = 'inline-block';
-    // Wait for server to wake — poll ping every 3 seconds up to 90 seconds
-    const wakeStart = performance.now();
-    let woke = false;
-    while (performance.now() - wakeStart < 90000) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const resp = await fetchWithTimeout(API_BASE + '/api/ping', {}, 2000);
-        if (resp.ok) { woke = true; break; }
-      } catch(e) { /* still sleeping */ }
-    }
-    if (!woke) {
-      hideModal();
-      document.getElementById('btn-modal-cancel').style.display = 'none';
-      _profileRunning = false;
-      setStatus('Server did not respond within 90 seconds. Please try again.');
-      return;
-    }
-    hideModal();
-  }
-
-  // ── Step 2: Check cache — determines modal message shown ────────────────
-  cachedBbox = routeBbox(waypoints, WCS_BUFFER_M);
-  let isCached = false;
-  try {
-    const lats = waypoints.map(w => w.lat);
-    const lngs = waypoints.map(w => w.lng);
-    const bboxResp = await fetchWithTimeout(
-      API_BASE + '/api/check_cache?' + new URLSearchParams({
-        minlat: Math.min(...lats), minlng: Math.min(...lngs),
-        maxlat: Math.max(...lats), maxlng: Math.max(...lngs)
-      }), {}, 5000);
-    if (bboxResp.ok) {
-      const bboxData = await bboxResp.json();
-      isCached = bboxData.cached;
-    }
-  } catch(e) { isCached = false; }
-
-  // ── Step 3: Show appropriate modal and fetch profile ─────────────────────
-  if (isCached) {
-    showModal('Calculating profile', 'Loading from cache and computing ceilings...');
-  } else {
-    showModal('Downloading terrain data',
-      'Requesting terrain from DEFRA WCS — please wait...');
-  }
-  document.getElementById('btn-modal-cancel').style.display = 'inline-block';
-  await new Promise(r => setTimeout(r, 30));
-
   const t0 = performance.now();
+
   _currentAbort = new AbortController();
+  document.getElementById('btn-modal-cancel').style.display = 'inline-block';
 
   let profile;
   try {
