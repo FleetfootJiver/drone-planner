@@ -527,23 +527,28 @@ async function runProfile() {
     _currentAbort = new AbortController();
     const wakeAbort = _currentAbort;
 
-    // Fire a long-running fetch to actually trigger Render to wake the instance.
-    // We don't await it — it runs in the background and will eventually resolve
-    // or be abandoned. Its only purpose is to keep a connection open so Render
-    // registers a real request and starts the container.
-    fetch(API_BASE + '/api/ping').catch(() => {});
+    // Fire a no-cors GET to bypass CORS preflight — this reaches Render even
+    // when the instance is asleep and triggers it to wake. mode:'no-cors'
+    // means we can't read the response but the request does arrive at Render.
+    fetch(API_BASE + '/api/ping', { mode: 'no-cors' }).catch(() => {});
 
-    // Poll with short timeouts until server responds or user cancels
+    // Poll until server is awake enough to complete a normal CORS request.
+    // Each poll attempt is a standard fetch — once the server is fully up
+    // it will respond to these correctly. Allow 4s per attempt (covers
+    // network round-trip after wake) with 3s gap between attempts.
     let woke = false;
     const wakeStart = performance.now();
     while (performance.now() - wakeStart < 90000) {
       if (wakeAbort.signal.aborted) break;
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 4000));
       if (wakeAbort.signal.aborted) break;
       try {
-        const resp = await fetchWithTimeout(API_BASE + '/api/ping', {}, 2000);
+        const resp = await fetchWithTimeout(API_BASE + '/api/ping', {}, 4000);
         if (resp.ok) { woke = true; break; }
-      } catch(e) { /* still waking */ }
+      } catch(e) {
+        // Re-send no-cors wake trigger periodically in case first was lost
+        fetch(API_BASE + '/api/ping', { mode: 'no-cors' }).catch(() => {});
+      }
     }
 
     hideModal();
