@@ -154,14 +154,11 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 const SAMPLE_SPACING = 1;
 const RULE_RADIUS = 120;
 
-// Backend API — local dev server. When deployed to Render.com this will be
-// the Render service URL e.g. 'https://drone-planner-api.onrender.com'
+// Backend API URL
 const isLocal = ['localhost','127.0.0.1'].includes(window.location.hostname);
-// Use the same hostname the browser used to reach the frontend,
-// so localhost:8080 -> localhost:8000 and 127.0.0.1:8080 -> 127.0.0.1:8000
 const API_BASE = isLocal
   ? window.location.protocol + '//' + window.location.hostname + ':8000'
-  : '';  // '' = same origin when frontend and backend share a domain on Render
+  : 'https://drone-backend-2k0b.onrender.com';
 
 document.addEventListener('DOMContentLoaded', function() {
 const canvasRenderer = L.canvas();
