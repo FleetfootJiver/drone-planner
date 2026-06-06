@@ -710,6 +710,7 @@ async function runProfile() {
   } else {
     srcLabel = 'local tiles';
   }
+  const dsmMissing = profile.dsm.every(v => v === null);
   let statusMsg = 'Profile loaded (' + srcLabel + '): '
     + profile.points + ' points, '
     + profile.total_length_m.toFixed(0) + ' m. '
