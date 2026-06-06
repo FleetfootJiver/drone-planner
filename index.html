@@ -237,6 +237,23 @@ function ruleBCeiling(dtm, dx) {
 
 function setStatus(msg) { document.getElementById('status-bar').textContent = msg; }
 
+function updateModal(msg) {
+  document.getElementById('modal-msg').textContent = msg;
+}
+
+function detectNation(waypoints) {
+  // Rough lat/lng thresholds matching backend OSGB thresholds
+  const lats = waypoints.map(w => w.lat);
+  const lngs = waypoints.map(w => w.lng);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+  const inScotland = minLat > 55.0;          // ~SCOTLAND_MIN_Y N500000
+  const inWales    = maxLng < -2.9 && minLat < 53.5;  // ~WALES_MAX_X
+  if (inScotland) return 'Scotland';
+  if (inWales)    return 'Wales';
+  return 'England';
+}
+
 function updateMarkers() {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
@@ -581,11 +598,15 @@ async function runProfile() {
   } catch(e) { isCached = false; }
 
   // ── Step 3: Show appropriate modal and fetch profile ─────────────────────
+  const nation = detectNation(waypoints);
+  const sourceDesc = nation === 'Scotland' ? 'Scottish LiDAR (AWS S3)' :
+                     nation === 'Wales'    ? 'Welsh LiDAR COG (DataMapWales)' :
+                                            'DEFRA LiDAR WCS';
   if (isCached) {
     showModal('Calculating profile', 'Loading from cache and computing ceilings...');
   } else {
     showModal('Downloading terrain data',
-      'Requesting terrain from DEFRA WCS — please wait...');
+      'Requesting ' + nation + ' terrain from ' + sourceDesc + ' — please wait...');
   }
   document.getElementById('btn-modal-cancel').style.display = 'inline-block';
   await new Promise(r => setTimeout(r, 30));
@@ -681,16 +702,21 @@ async function runProfile() {
   hideModal();
   const t2 = performance.now();
   const calcSec = ((t2 - t1) / 1000).toFixed(1);
-  const srcLabel = profile.source === 'wcs' ? 'DEFRA WCS' : 'local tiles';
-  const cacheLabel = profile.source === 'wcs' && parseFloat(fetchSec) < 2.0 ? ' (cached)' : '';
-  const dsmMissing = profile.dsm.every(v => v === null);
-  let statusMsg = 'Profile loaded (' + srcLabel + cacheLabel + '): '
+  let srcLabel;
+  if (profile.source === 'wcs') {
+    srcLabel = parseFloat(fetchSec) < 2.0 ? 'DEFRA WCS (cached)' : 'DEFRA WCS';
+  } else if (profile.source === 'in-memory') {
+    srcLabel = nation;
+  } else {
+    srcLabel = 'local tiles';
+  }
+  let statusMsg = 'Profile loaded (' + srcLabel + '): '
     + profile.points + ' points, '
     + profile.total_length_m.toFixed(0) + ' m. '
     + 'Fetch: ' + fetchSec + 's  Calc: ' + calcSec + 's. '
     + 'Tiles: ' + profile.tiles_used.join(', ') + '.';
-  if (dsmMissing) statusMsg += ' ⚠ DSM unavailable (DEFRA server error) — Rule A/B calculated from DTM only.';
-  else if (profile.warnings.length) statusMsg += ' ⚠ ' + profile.warnings.join(' ');
+  if (dsmMissing) statusMsg += ' ⚠ DSM unavailable — altitude ceilings calculated from DTM only.';
+  if (profile.warnings.length) statusMsg += ' ⚠ ' + profile.warnings.join(' ');
   setStatus(statusMsg);
 };
 
