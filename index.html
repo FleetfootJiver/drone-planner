@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Drone Route Planner</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -161,6 +162,10 @@ const API_BASE = isLocal
   : 'https://drone-backend-2k0b.onrender.com';
 
 document.addEventListener('DOMContentLoaded', function() {
+// Wake the backend immediately so any cold-start delay runs in parallel
+// with the user defining their route. Result is ignored.
+fetch(API_BASE + '/api/health').catch(() => {});
+
 const canvasRenderer = L.canvas();
 const map = L.map('map', { preferCanvas: true }).setView([51.5, -1.8], 10);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
