@@ -23,7 +23,6 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 .tb-btn.danger:hover { background: #fdf0f0; }
 #rule-toggle { display: flex; gap: 4px; }
 #wp-count { font-size: 12px; color: #666; }
-#fmt-select { font-size: 12px; padding: 5px 6px; border: 1px solid #ccc; border-radius: 6px; background: white; color: #333; cursor: pointer; }
 #load-input { display: none; }
 #map { width: 100%; height: 380px; }
 #status-bar { padding: 5px 12px; font-size: 12px; color: #555; background: #f0f0ee; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; min-height: 26px; }
@@ -98,6 +97,51 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
   margin: 12px auto 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Settings panel */
+#settings-panel {
+  display: none;
+  position: absolute;
+  top: 0; right: 0;
+  width: 280px;
+  height: 100%;
+  background: white;
+  border-left: 1px solid #ddd;
+  box-shadow: -4px 0 16px rgba(0,0,0,0.12);
+  z-index: 2000;
+  overflow-y: auto;
+  flex-direction: column;
+}
+#settings-panel.open { display: flex; }
+#settings-panel h2 {
+  font-size: 13px; font-weight: 600; color: #1a2a3a;
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid #eee;
+  display: flex; align-items: center; justify-content: space-between;
+}
+#settings-panel h2 button {
+  background: none; border: none; cursor: pointer;
+  font-size: 16px; color: #888; line-height: 1;
+}
+#settings-panel h2 button:hover { color: #333; }
+.sg-section {
+  padding: 10px 14px 6px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.sg-section-title {
+  font-size: 11px; font-weight: 600; color: #888;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+.sg-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: #333; margin-bottom: 6px;
+}
+.sg-row input[type=radio],
+.sg-row input[type=checkbox] { margin: 0; cursor: pointer; accent-color: #1a6fa8; }
+.sg-row label { cursor: pointer; }
+.sg-indent { padding-left: 16px; }
+.sg-disabled { opacity: 0.4; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -110,11 +154,6 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
   <button class="tb-btn danger" id="btn-clear">Clear all</button>
   <button class="tb-btn" id="btn-profile">&#x25B6; Calculate profile</button>
   <span id="wp-count">0 waypoints</span>
-  <select id="fmt-select">
-    <option value="csv">CSV</option>
-    <option value="kml">KML</option>
-    <option value="geojson">GeoJSON</option>
-  </select>
   <button class="tb-btn" id="btn-save">&#x2913; Save route</button>
   <button class="tb-btn" id="btn-load">&#x2912; Load route</button>
   <button class="tb-btn" id="btn-png-map">&#x1F5FA; Map PNG</button>
@@ -122,12 +161,10 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
   <button class="tb-btn" id="btn-png-both">&#x1F4F7; Both PNG</button>
   <input type="file" id="load-input" accept=".csv,.kml,.geojson,.json">
   <div style="width:1px;background:#ddd;align-self:stretch;margin:2px 2px;"></div>
-  <div id="rule-toggle">
-    <button class="tb-btn active" id="btn-ruleA">Rule A</button>
-    <button class="tb-btn active" id="btn-ruleB">Rule B</button>
-  </div>
   <button class="tb-btn" id="btn-layout" title="Toggle side-by-side layout">&#x25ED; Layout</button>
+  <button class="tb-btn" id="btn-settings" title="Settings" style="margin-left:auto;">&#x2699;&#xFE0F; Settings</button>
 </div>
+<div style="position:relative;flex:1;display:flex;flex-direction:column;overflow:hidden;">
 <div id="main-layout">
   <div id="left-pane">
     <div id="map"></div>
@@ -137,9 +174,11 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
     <div id="chart-section"><canvas id="profile-chart"></canvas></div>
     <div id="legend">
       <div class="leg-item"><div class="leg-line" style="background:#7c5c2e"></div>DTM (bare earth)</div>
-      <div class="leg-item"><div class="leg-line" style="background:#2a7a3b"></div>DSM (buildings and vegetation)</div>
-      <div class="leg-item"><div class="leg-line dashed" style="color:#c94040"></div>Rule A ceiling (DTM+120m)</div>
-      <div class="leg-item"><div class="leg-line dashed" style="color:#1a6fa8"></div>Rule B (120m from nearest terrain)</div>
+      <div class="leg-item"><div class="leg-line" style="background:#2a7a3b"></div>DSM (surface)</div>
+      <div class="leg-item"><div class="leg-line dashed" style="color:#c94040"></div>Rule A (DTM+120m)</div>
+      <div class="leg-item"><div class="leg-line dashed" style="color:#1a6fa8"></div>Rule B arc (nearest surface within 120m)</div>
+      <div class="leg-item"><div class="leg-line dashed" style="color:#e07820"></div>Rule B linear (nearest surface along route)</div>
+      <div class="leg-item"><div class="leg-line dashed" style="color:#222"></div>Rule C (120m above TOAL)</div>
     </div>
     <div id="info-cards">
       <div class="i-card"><div class="label">Route length</div><div class="value" id="ic-dist">&mdash;</div><div class="unit">metres</div></div>
@@ -148,9 +187,43 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
       <div class="i-card"><div class="label">Max terrain height</div><div class="value" id="ic-maxterrain">&mdash;</div><div class="unit">m ASL</div></div>
       <div class="i-card"><div class="label">Waypoints</div><div class="value" id="ic-wps">0</div><div class="unit">points</div></div>
     </div>
-    <div id="note">DTM and DSM data from DEFRA Environment Agency via WCS. Coverage: England and Wales. Drag markers to reposition waypoints. Double-click a marker to delete it.</div>
+    <div id="note">DTM and DSM data from DEFRA Environment Agency via WCS. Coverage: England, Wales and Scotland. Drag markers to reposition waypoints. Double-click a marker to delete it.</div>
+  </div>
+</div><!-- end main-layout -->
+
+<!-- Settings panel (slides in over the right edge of the layout wrapper) -->
+<div id="settings-panel">
+  <h2>Settings <button id="btn-settings-close" title="Close">&#x2715;</button></h2>
+
+  <div class="sg-section">
+    <div class="sg-section-title">Rules displayed</div>
+    <div class="sg-row"><input type="checkbox" id="sg-ruleA" checked><label for="sg-ruleA">Rule A — 120m above terrain</label></div>
+    <div class="sg-row"><input type="checkbox" id="sg-ruleBlin" checked><label for="sg-ruleBlin">Rule B — nearest surface along route</label></div>
+    <div class="sg-row"><input type="checkbox" id="sg-ruleBarc" checked><label for="sg-ruleBarc">Rule B — nearest surface within 120m</label></div>
+    <div class="sg-row"><input type="checkbox" id="sg-ruleC"><label for="sg-ruleC">Rule C — 120m above TOAL</label></div>
+  </div>
+
+  <div class="sg-section">
+    <div class="sg-section-title">Save / load file format</div>
+    <div class="sg-row"><input type="radio" name="sg-fmt" id="sg-fmt-csv" value="csv" checked><label for="sg-fmt-csv">CSV</label></div>
+    <div class="sg-row"><input type="radio" name="sg-fmt" id="sg-fmt-kml" value="kml"><label for="sg-fmt-kml">KML</label></div>
+    <div class="sg-row"><input type="radio" name="sg-fmt" id="sg-fmt-geojson" value="geojson"><label for="sg-fmt-geojson">GeoJSON</label></div>
+  </div>
+
+  <div class="sg-section">
+    <div class="sg-section-title">Keepalive</div>
+    <div class="sg-row"><input type="radio" name="sg-ka" id="sg-ka-off" value="0" checked><label for="sg-ka-off">Off</label></div>
+    <div class="sg-row"><input type="radio" name="sg-ka" id="sg-ka-5"  value="5"><label for="sg-ka-5">Every 5 minutes</label></div>
+    <div class="sg-row"><input type="radio" name="sg-ka" id="sg-ka-10" value="10"><label for="sg-ka-10">Every 10 minutes</label></div>
+    <div class="sg-row"><input type="radio" name="sg-ka" id="sg-ka-14" value="14"><label for="sg-ka-14">Every 14 minutes</label></div>
+    <div class="sg-section-title sg-indent" id="sg-max-label" style="margin-top:8px;">Maximum duration</div>
+    <div class="sg-row sg-indent sg-disabled" id="sg-max-row-30"><input type="radio" name="sg-kamax" id="sg-kamax-30" value="30" checked><label for="sg-kamax-30">30 minutes</label></div>
+    <div class="sg-row sg-indent sg-disabled" id="sg-max-row-60"><input type="radio" name="sg-kamax" id="sg-kamax-60" value="60"><label for="sg-kamax-60">1 hour</label></div>
+    <div class="sg-row sg-indent sg-disabled" id="sg-max-row-120"><input type="radio" name="sg-kamax" id="sg-kamax-120" value="120"><label for="sg-kamax-120">2 hours</label></div>
   </div>
 </div>
+
+</div><!-- end layout wrapper -->
 <script>
 const SAMPLE_SPACING = 1;
 const RULE_RADIUS = 120;
@@ -175,7 +248,33 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 }).addTo(map);
 
 let waypoints = [], markers = [], routeLine = null, profileChart = null;
-let showRuleA = true, showRuleB = true, adding = true;
+let adding = true;
+
+// ── Rule visibility state (driven by settings checkboxes) ──────────────────
+let showRuleA    = true;
+let showRuleBlin = true;   // Rule B linear (nearest surface along route)
+let showRuleBarc = true;   // Rule B arc    (nearest surface within 120m)
+let showRuleC    = false;  // Rule C        (120m above TOAL / WP1)
+
+// ── Rule calculations ──────────────────────────────────────────────────────
+function ruleACeiling(dtm)        { return dtm.map(v => v + 120); }
+function ruleCCeiling(dtm)        { return new Array(dtm.length).fill(dtm[0] + 120); }
+
+// Rule B linear: max DTM along route (used in original implementation)
+function ruleBLinCeiling(dtm, dx) {
+  const n = dtm.length, r = RULE_RADIUS, halfW = r - 1;
+  const ceiling = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let maxVal = -Infinity;
+    const lo = Math.max(0, i - halfW), hi = Math.min(n-1, i + halfW);
+    for (let j = lo; j <= hi; j++) {
+      const v = dtm[j] + r;
+      if (v > maxVal) maxVal = v;
+    }
+    ceiling[i] = maxVal;
+  }
+  return ceiling;
+}
 
 function haversine(a, b) {
   const R = 6371000;
@@ -183,6 +282,23 @@ function haversine(a, b) {
   const dLon = (b.lng - a.lng) * Math.PI / 180;
   const s = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
   return R * 2 * Math.asin(Math.sqrt(s));
+}
+
+// Rule B arc: 3-D arc from nearest surface within sphere (current server version)
+function ruleBarcCeiling(dtm, dx) {
+  const n = dtm.length, r = RULE_RADIUS, r2 = r*r, halfW = r - 1;
+  const ceiling = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let maxVal = 0;
+    const lo = Math.max(0, i - halfW), hi = Math.min(n-1, i + halfW);
+    for (let j = lo; j <= hi; j++) {
+      const d = Math.abs(j - i) * dx;
+      const arc = dtm[j] + Math.sqrt(r2 - d*d);
+      if (arc > maxVal) maxVal = arc;
+    }
+    ceiling[i] = maxVal;
+  }
+  return ceiling;
 }
 
 function interpolatePoints(wps, spacing) {
@@ -223,22 +339,6 @@ async function fetchProfile(waypoints, signal) {
 }
 
 function ruleACeiling(dtm) { return dtm.map(v => v + 120); }
-
-function ruleBCeiling(dtm, dx) {
-  const n = dtm.length, r = RULE_RADIUS, r2 = r*r, halfW = r - 1;
-  const ceiling = new Array(n);
-  for (let i = 0; i < n; i++) {
-    let maxVal = 0;
-    const lo = Math.max(0, i - halfW), hi = Math.min(n-1, i + halfW);
-    for (let j = lo; j <= hi; j++) {
-      const d = Math.abs(j - i) * dx;
-      const arc = dtm[j] + Math.sqrt(r2 - d*d);
-      if (arc > maxVal) maxVal = arc;
-    }
-    ceiling[i] = maxVal;
-  }
-  return ceiling;
-}
 
 function setStatus(msg) { document.getElementById('status-bar').textContent = msg; }
 
@@ -327,19 +427,77 @@ document.getElementById('btn-clear').onclick = () => {
   setStatus('Cleared. Click the map to place new waypoints.');
 };
 
-document.getElementById('btn-ruleA').onclick = function() {
-  showRuleA = !showRuleA;
-  this.classList.toggle('active', showRuleA);
-  if (profileChart) { profileChart.data.datasets[2].hidden = !showRuleA; profileChart.update(); }
-};
-
-document.getElementById('btn-ruleB').onclick = function() {
-  showRuleB = !showRuleB;
-  this.classList.toggle('active', showRuleB);
-  if (profileChart) { profileChart.data.datasets[3].hidden = !showRuleB; profileChart.update(); }
-};
-
 document.getElementById('btn-profile').onclick = () => runProfile();
+
+// ── Settings panel ──────────────────────────────────────────────────────────
+const settingsPanel = document.getElementById('settings-panel');
+
+document.getElementById('btn-settings').onclick = () =>
+  settingsPanel.classList.toggle('open');
+document.getElementById('btn-settings-close').onclick = () =>
+  settingsPanel.classList.remove('open');
+
+// Rule checkboxes
+function applyRuleVisibility() {
+  if (!profileChart) return;
+  const ds = profileChart.data.datasets;
+  // Dataset indices: 0=DTM, 1=DSM, 2=RuleA, 3=RuleBlin, 4=RuleBarc, 5=RuleC
+  ds[2].hidden = !showRuleA;
+  ds[3].hidden = !showRuleBlin;
+  ds[4].hidden = !showRuleBarc;
+  ds[5].hidden = !showRuleC;
+  profileChart.update();
+}
+
+document.getElementById('sg-ruleA').onchange    = function() { showRuleA    = this.checked; applyRuleVisibility(); };
+document.getElementById('sg-ruleBlin').onchange = function() { showRuleBlin = this.checked; applyRuleVisibility(); };
+document.getElementById('sg-ruleBarc').onchange = function() { showRuleBarc = this.checked; applyRuleVisibility(); };
+document.getElementById('sg-ruleC').onchange    = function() { showRuleC    = this.checked; applyRuleVisibility(); };
+
+// File format
+function getFileFmt() {
+  return document.querySelector('input[name="sg-fmt"]:checked').value;
+}
+
+// ── Keepalive ───────────────────────────────────────────────────────────────
+let _kaIntervalId  = null;
+let _kaMaxTimerId  = null;
+
+function stopKeepalive() {
+  clearInterval(_kaIntervalId);  _kaIntervalId = null;
+  clearTimeout(_kaMaxTimerId);   _kaMaxTimerId = null;
+}
+
+function startKeepalive(intervalMin, maxMin) {
+  stopKeepalive();
+  if (intervalMin === 0) return;
+  _kaIntervalId = setInterval(() => {
+    if (!API_BASE || waypoints.length < 2) return;
+    fetch(API_BASE + '/api/keepalive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) })
+    }).catch(() => {});
+  }, intervalMin * 60 * 1000);
+  _kaMaxTimerId = setTimeout(stopKeepalive, maxMin * 60 * 1000);
+}
+
+function updateKeepalive() {
+  const intervalMin = parseInt(document.querySelector('input[name="sg-ka"]:checked').value, 10);
+  const maxMin      = parseInt(document.querySelector('input[name="sg-kamax"]:checked').value, 10);
+  const maxRows = ['sg-max-row-30','sg-max-row-60','sg-max-row-120','sg-max-label'];
+  maxRows.forEach(id => {
+    document.getElementById(id).classList.toggle('sg-disabled', intervalMin === 0);
+  });
+  startKeepalive(intervalMin, maxMin);
+}
+
+document.querySelectorAll('input[name="sg-ka"]').forEach(r =>
+  r.addEventListener('change', updateKeepalive));
+document.querySelectorAll('input[name="sg-kamax"]').forEach(r =>
+  r.addEventListener('change', updateKeepalive));
+
+
 
 // --- Save / Load ---
 
@@ -397,7 +555,7 @@ function saveGeoJSON() {
 }
 
 document.getElementById('btn-save').onclick = () => {
-  const fmt = document.getElementById('fmt-select').value;
+  const fmt = getFileFmt();
   if (fmt === 'csv') saveCSV();
   else if (fmt === 'kml') saveKML();
   else saveGeoJSON();
@@ -522,10 +680,6 @@ async function runProfile() {
   if (waypoints.length < 2) { setStatus('Please place at least 2 waypoints first.'); return; }
   _profileRunning = true;
 
-  // Cancel any pending keepalive
-  clearTimeout(_keepaliveTimer);
-  _keepaliveTimer = null;
-
   // ── Step 1: Quick ping — 1000ms timeout to detect if server is already awake
   setStatus('Contacting backend...');
   let serverAwake = false;
@@ -646,18 +800,19 @@ async function runProfile() {
   const dsm = profile.dsm;
   const distances = profile.distances_m.map(d => Math.round(d));
 
-  // Rule A and B computed client-side from DTM
-  // Use actual point spacing from backend distances
-  const dx = profile.total_length_m / (profile.points - 1);
-  const ruleA = ruleACeiling(dtm.map(v => v ?? 0));
-  const ruleB = ruleBCeiling(dtm.map(v => v ?? 0), dx);
+  // Rule A, B-linear, B-arc and C computed client-side from DTM
+  const dx      = profile.total_length_m / (profile.points - 1);
+  const ruleA   = ruleACeiling(dtm.map(v => v ?? 0));
+  const ruleBlin = ruleBLinCeiling(dtm.map(v => v ?? 0), dx);
+  const ruleBarc = ruleBarcCeiling(dtm.map(v => v ?? 0), dx);
+  const ruleC   = ruleCCeiling(dtm.map(v => v ?? 0));
 
   document.getElementById('ic-ruleA').textContent = Math.round(Math.min(...ruleA));
-  document.getElementById('ic-ruleB').textContent = Math.round(Math.min(...ruleB));
+  document.getElementById('ic-ruleB').textContent = Math.round(Math.min(...ruleBarc));
   document.getElementById('ic-maxterrain').textContent = Math.round(Math.max(...dtm.filter(v => v !== null)));
   document.getElementById('ic-dist').textContent = Math.round(profile.total_length_m);
 
-  const allVals = [...dtm, ...dsm, ...ruleA, ...ruleB].filter(v => v !== null);
+  const allVals = [...dtm, ...dsm, ...ruleA, ...ruleBlin, ...ruleBarc, ...ruleC].filter(v => v !== null);
   const yMin = Math.floor(Math.min(...allVals)/10)*10 - 10;
   const yMax = Math.ceil(Math.max(...allVals)/10)*10 + 20;
 
@@ -671,17 +826,21 @@ async function runProfile() {
         pointRadius: 0, fill: false, tension: 0.2 },
       { label: 'Rule A (DTM+120m)', data: ruleA, borderColor: '#c94040', borderWidth: 2,
         borderDash: [7,4], pointRadius: 0, fill: false, tension: 0.3, hidden: !showRuleA },
-      { label: 'Rule B (120m from nearest terrain)', data: ruleB, borderColor: '#1a6fa8', borderWidth: 2,
-        borderDash: [7,4], pointRadius: 0, fill: false, tension: 0.3, hidden: !showRuleB }
+      { label: 'Rule B linear (along route)', data: ruleBlin, borderColor: '#e07820', borderWidth: 2,
+        borderDash: [5,4], pointRadius: 0, fill: false, tension: 0.3, hidden: !showRuleBlin },
+      { label: 'Rule B arc (within 120m)', data: ruleBarc, borderColor: '#1a6fa8', borderWidth: 2,
+        borderDash: [7,4], pointRadius: 0, fill: false, tension: 0.3, hidden: !showRuleBarc },
+      { label: 'Rule C (120m above TOAL)', data: ruleC, borderColor: '#111', borderWidth: 2,
+        borderDash: [6,4], pointRadius: 0, fill: false, tension: 0, hidden: !showRuleC }
     ]},
     options: {
       responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        waypointLines: { waypoints: waypoints, distances: distances,
-                         showRuleA: showRuleA, showRuleB: showRuleB,
-                         ruleA: ruleA, ruleB: ruleB, dsm: dsm, yMin: yMin },
+        waypointLines: { waypoints, distances,
+                         showRuleA, showRuleBlin, showRuleBarc, showRuleC,
+                         ruleA, ruleBlin, ruleBarc, ruleC, dsm, yMin },
         tooltip: {
           backgroundColor: 'rgba(20,20,20,0.82)', titleFont: { size: 11 }, bodyFont: { size: 11 },
           callbacks: {
@@ -812,22 +971,8 @@ document.getElementById('btn-png-both').onclick = async () => {
   setStatus('Combined PNG saved.');
 };
 
-// --- Keepalive — reset TTL when user interacts with map ----------------
-let _keepaliveTimer = null;
-function touchSession() {
-  if (!API_BASE || waypoints.length < 2) return;
-  clearTimeout(_keepaliveTimer);
-  _keepaliveTimer = setTimeout(() => {
-    fetch(API_BASE + '/api/keepalive', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) })
-    }).catch(() => {}); // silent — keepalive failure is not critical
-  }, 5000); // debounce 5 s
-}
-map.on('click', touchSession);
-// Note: don't use map.on('dragend') as it fires for both map pan
-// and marker drags — keepalive is sent on click only
+// Keepalive is controlled via the Settings panel (interval timer).
+// See startKeepalive() / stopKeepalive() above.
 
 // --- Waypoint lines Chart.js plugin (registered once at top level) --------
 const waypointLinesPlugin = {
@@ -857,17 +1002,22 @@ const waypointLinesPlugin = {
       }
       const xPx = xAxis.getPixelForValue(closest);
 
-      // Top of line: highest visible ceiling at this point
-      let topVal;
-      if (opts.showRuleB && opts.ruleB && opts.ruleB[closest] != null) {
-        topVal = opts.ruleB[closest];
-      } else if (opts.showRuleA && opts.ruleA && opts.ruleA[closest] != null) {
-        topVal = opts.ruleA[closest];
-      } else if (opts.dsm && opts.dsm[closest] != null) {
-        topVal = opts.dsm[closest];
-      } else {
-        topVal = yAxis.max;
+      // Top of vertical line: highest enabled ceiling at this waypoint
+      let topVal = null;
+      const candidates = [
+        opts.showRuleBarc && opts.ruleBarc,
+        opts.showRuleBlin && opts.ruleBlin,
+        opts.showRuleA    && opts.ruleA,
+        opts.showRuleC    && opts.ruleC,
+      ];
+      for (const arr of candidates) {
+        if (arr && arr[closest] != null) {
+          if (topVal === null || arr[closest] > topVal) topVal = arr[closest];
+        }
       }
+      if (topVal === null && opts.dsm && opts.dsm[closest] != null) topVal = opts.dsm[closest];
+      if (topVal === null) topVal = yAxis.max;
+
       const yTop = yAxis.getPixelForValue(topVal);
       const yBot = yAxis.getPixelForValue(opts.yMin + 5);
 
