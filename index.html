@@ -1030,11 +1030,11 @@ function buildFpvHtml() {
   // The entire FPV window as a self-contained HTML string.
   // Three.js r128 is used (matches what's available on cdnjs in this environment).
   return `<!DOCTYPE html>
-<html lang="en">
+<\x3Chtml lang="en">
 <head>
 <meta charset="UTF-8">
 <title>FPV View — Drone Route Planner</title>
-<style>
+<\x3Cstyle>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#111; color:#eee; font-family:system-ui,sans-serif;
        display:flex; flex-direction:column; height:100vh; overflow:hidden; }
@@ -1075,14 +1075,14 @@ canvas { display:block; width:100%!important; height:100%!important; }
   width:260px; height:6px; background:#333; border-radius:3px; overflow:hidden;
 }
 #load-bar { height:100%; background:#4a9eff; width:0%; transition:width 0.2s; }
-</style>
+<\/style>
 </head>
-<body>
+<\x3Cbody>
 <div id="canvas-wrap">
   <canvas id="c"></canvas>
   <div id="hud">Initialising…</div>
   <div id="loading">
-    <div>Building terrain…</div>
+    <div id='load-msg'>Starting…</div>
     <div id="load-bar-wrap"><div id="load-bar"></div></div>
   </div>
 </div>
@@ -1096,8 +1096,8 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <span id="time-label">0 m / 0 m</span>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
-<script>
+<\x3Cscript src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
+<\x3Cscript>
 (function() {
 'use strict';
 
@@ -1123,17 +1123,20 @@ function decodeF32(b64) {
   return new Float32Array(buf);
 }
 
-function setLoad(pct) {
+function setLoad(pct, msg) {
   document.getElementById('load-bar').style.width = pct + '%';
+  if (msg) document.getElementById('load-msg').textContent = msg;
+  console.log('[FPV]', pct + '%', msg || '');
 }
 
 // ── Defer heavy work so the browser can paint the loading screen first ──────
 setTimeout(async function() {
+try {
 
-setLoad(10);
+setLoad(10, 'Decoding DTM…');
 const dtmFlat = decodeF32(grid.dtm_grid);    // south-to-north, row-major
 const dsmFlat = grid.dsm_grid ? decodeF32(grid.dsm_grid) : null;
-setLoad(25);
+setLoad(25, 'Decoding DSM…');
 
 // ── Three.js scene ──────────────────────────────────────────────────────────
 const canvas   = document.getElementById('c');
@@ -1177,7 +1180,7 @@ scene.add(new THREE.AmbientLight(0x8090b0, 0.6));
 // (Z increases southward so camera looks "forward" northward at start)
 const segs_x = W - 1, segs_z = H - 1;
 
-setLoad(35);
+setLoad(35, 'Building vertices…');
 
 // Helper: row-major index, rows south-to-north
 function idx(col, row) { return row * W + col; }
@@ -1217,7 +1220,7 @@ for (let row = 0; row < H; row++) {
   }
 }
 
-setLoad(60);
+setLoad(60, 'Building index…');
 
 // Index buffer: two triangles per quad
 const nQuads   = segs_x * segs_z;
@@ -1242,7 +1245,7 @@ const mat  = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.Fro
 const mesh = new THREE.Mesh(geo, mat);
 scene.add(mesh);
 
-setLoad(80);
+setLoad(80, 'Building flight path…');
 
 // ── Camera flight path ──────────────────────────────────────────────────────
 // Convert WGS84 waypoints to OSGB world coords using the profile sample points.
@@ -1303,7 +1306,7 @@ for (let s = 0; s < nSamples; s++) {
   path.push({ x: wx, y: dtmVal + FLIGHT_ALT_AGL, z: wz });
 }
 
-setLoad(90);
+setLoad(90, 'Setting up camera…');
 
 // ── Waypoint indices in path ─────────────────────────────────────────────────
 const wpPathIdx = wpDist.map(d => Math.round((d / totalDist) * (nSamples - 1)));
@@ -1411,11 +1414,17 @@ scrubber.addEventListener('input', () => {
 });
 
 // ── Hide loading overlay and start ───────────────────────────────────────────
-setLoad(100);
+setLoad(100, 'Ready.');
 setTimeout(() => {
   document.getElementById('loading').style.display = 'none';
   requestAnimationFrame(animate);
 }, 200);
+
+} catch(err) {
+  console.error('[FPV] Fatal error:', err);
+  document.getElementById('load-msg').textContent = 'Error: ' + err.message;
+  document.getElementById('load-bar').style.background = '#c94040';
+}
 
 }, 50);   // end deferred init
 <\/script>
