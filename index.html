@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v1.4 -->
+<!-- Drone Route Planner v1.5 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1028,14 +1028,127 @@ function openFpvWindow() {
 }
 
 function buildFpvHtml() {
-  // The entire FPV window as a self-contained HTML string.
-  // Three.js r128 is used (matches what's available on cdnjs in this environment).
-  return `<!DOCTYPE html>
+  return document.getElementById('fpv-template').textContent;
+}
+
+// Invalidate cached terrain grid and profile when waypoints change
+function invalidateTerrainGrid() {
+  _terrainGrid = null;
+  _lastProfile = null;
+}
+
+
+// --- Waypoint lines Chart.js plugin (registered once at top level) --------
+const waypointLinesPlugin = {
+  id: 'waypointLines',
+  afterDraw(chart) {
+    const opts = chart.options.plugins.waypointLines;
+    if (!opts || !opts.waypoints || opts.waypoints.length < 2) return;
+    const ctx2 = chart.ctx;
+    const xAxis = chart.scales.x;
+    const yAxis = chart.scales.y;
+    const wps = opts.waypoints;
+
+    // Compute cumulative distances to each waypoint
+    let cumDist = 0;
+    const wpDists = [0];
+    for (let i = 1; i < wps.length; i++) {
+      cumDist += haversine(wps[i-1], wps[i]);
+      wpDists.push(Math.round(cumDist));
+    }
+
+    const distArr = opts.distances;
+    wpDists.forEach((wpD, wi) => {
+      let closest = 0, minDiff = Infinity;
+      for (let i = 0; i < distArr.length; i++) {
+        const diff = Math.abs(distArr[i] - wpD);
+        if (diff < minDiff) { minDiff = diff; closest = i; }
+      }
+      const xPx = xAxis.getPixelForValue(closest);
+
+      // Top of vertical line: highest enabled ceiling at this waypoint
+      let topVal = null;
+      const candidates = [
+        opts.showRuleBarc && opts.ruleBarc,
+        opts.showRuleBlin && opts.ruleBlin,
+        opts.showRuleA    && opts.ruleA,
+        opts.showRuleC    && opts.ruleC,
+      ];
+      for (const arr of candidates) {
+        if (arr && arr[closest] != null) {
+          if (topVal === null || arr[closest] > topVal) topVal = arr[closest];
+        }
+      }
+      if (topVal === null && opts.dsm && opts.dsm[closest] != null) topVal = opts.dsm[closest];
+      if (topVal === null) topVal = yAxis.max;
+
+      const yTop = yAxis.getPixelForValue(topVal);
+      const yBot = yAxis.getPixelForValue(opts.yMin + 5);
+
+      // Dashed vertical line
+      ctx2.save();
+      ctx2.beginPath();
+      ctx2.setLineDash([4, 3]);
+      ctx2.strokeStyle = 'rgba(26,106,168,0.55)';
+      ctx2.lineWidth = 1.5;
+      ctx2.moveTo(xPx, yTop);
+      ctx2.lineTo(xPx, yBot);
+      ctx2.stroke();
+
+      // Numbered circle at bottom
+      const r = 10;
+      ctx2.setLineDash([]);
+      ctx2.beginPath();
+      ctx2.arc(xPx, yBot + r + 2, r, 0, 2*Math.PI);
+      ctx2.fillStyle = '#1a6fa8';
+      ctx2.fill();
+      ctx2.strokeStyle = 'white';
+      ctx2.lineWidth = 1.5;
+      ctx2.stroke();
+      ctx2.fillStyle = 'white';
+      ctx2.font = 'bold 10px system-ui, sans-serif';
+      ctx2.textAlign = 'center';
+      ctx2.textBaseline = 'middle';
+      ctx2.fillText(String(wi + 1), xPx, yBot + r + 2);
+      ctx2.restore();
+    });
+  }
+};
+Chart.register(waypointLinesPlugin);
+
+// --- Layout toggle: Portrait (60/40) -> Landscape (50/50) -> Stacked ---
+const layoutModes = ['portrait', 'landscape', 'stacked'];
+const layoutLabels = ['◭ Landscape', '◭ Stacked', '◭ Portrait'];
+let layoutIdx = 0;
+document.getElementById('btn-layout').onclick = function() {
+  const layout = document.getElementById('main-layout');
+  layout.classList.remove(layoutModes[layoutIdx]);
+  layoutIdx = (layoutIdx + 1) % layoutModes.length;
+  layout.classList.add(layoutModes[layoutIdx]);
+  this.classList.toggle('active', layoutIdx !== 0);
+  this.textContent = layoutLabels[layoutIdx];
+  setTimeout(() => { map.invalidateSize(); }, 50);
+  if (profileChart) profileChart.resize();
+};
+
+});</script>
+
+<div id="modal-overlay">
+  <div id="modal-box">
+    <div class="modal-title" id="modal-title">Please wait</div>
+    <div class="modal-msg" id="modal-msg"></div>
+    <div class="modal-spinner"></div>
+    <button id="btn-modal-cancel" style="display:none;margin-top:14px;font-size:12px;padding:5px 16px;border:1px solid #c94040;border-radius:6px;background:white;color:#c94040;cursor:pointer;">Cancel</button>
+  </div>
+</div>
+
+<script type="text/template" id="fpv-template">
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>FPV View — Drone Route Planner</title>
-${'<'}style>
+<style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#111; color:#eee; font-family:system-ui,sans-serif;
        display:flex; flex-direction:column; height:100vh; overflow:hidden; }
@@ -1076,7 +1189,7 @@ canvas { display:block; width:100%!important; height:100%!important; }
   width:260px; height:6px; background:#333; border-radius:3px; overflow:hidden;
 }
 #load-bar { height:100%; background:#4a9eff; width:0%; transition:width 0.2s; }
-<\/style>
+</style>
 </head>
 <body>
 <div id="canvas-wrap">
@@ -1097,8 +1210,8 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <span id="time-label">0 m / 0 m</span>
 </div>
 
-${'<'}script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
-${'<'}script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
 (function() {
 'use strict';
 
@@ -1428,120 +1541,9 @@ setTimeout(() => {
 }
 
 }, 50);   // end deferred init
-<\/script>
-<\/body>
-<\/html>`;
-}
-
-// Invalidate cached terrain grid and profile when waypoints change
-function invalidateTerrainGrid() {
-  _terrainGrid = null;
-  _lastProfile = null;
-}
-
-
-// --- Waypoint lines Chart.js plugin (registered once at top level) --------
-const waypointLinesPlugin = {
-  id: 'waypointLines',
-  afterDraw(chart) {
-    const opts = chart.options.plugins.waypointLines;
-    if (!opts || !opts.waypoints || opts.waypoints.length < 2) return;
-    const ctx2 = chart.ctx;
-    const xAxis = chart.scales.x;
-    const yAxis = chart.scales.y;
-    const wps = opts.waypoints;
-
-    // Compute cumulative distances to each waypoint
-    let cumDist = 0;
-    const wpDists = [0];
-    for (let i = 1; i < wps.length; i++) {
-      cumDist += haversine(wps[i-1], wps[i]);
-      wpDists.push(Math.round(cumDist));
-    }
-
-    const distArr = opts.distances;
-    wpDists.forEach((wpD, wi) => {
-      let closest = 0, minDiff = Infinity;
-      for (let i = 0; i < distArr.length; i++) {
-        const diff = Math.abs(distArr[i] - wpD);
-        if (diff < minDiff) { minDiff = diff; closest = i; }
-      }
-      const xPx = xAxis.getPixelForValue(closest);
-
-      // Top of vertical line: highest enabled ceiling at this waypoint
-      let topVal = null;
-      const candidates = [
-        opts.showRuleBarc && opts.ruleBarc,
-        opts.showRuleBlin && opts.ruleBlin,
-        opts.showRuleA    && opts.ruleA,
-        opts.showRuleC    && opts.ruleC,
-      ];
-      for (const arr of candidates) {
-        if (arr && arr[closest] != null) {
-          if (topVal === null || arr[closest] > topVal) topVal = arr[closest];
-        }
-      }
-      if (topVal === null && opts.dsm && opts.dsm[closest] != null) topVal = opts.dsm[closest];
-      if (topVal === null) topVal = yAxis.max;
-
-      const yTop = yAxis.getPixelForValue(topVal);
-      const yBot = yAxis.getPixelForValue(opts.yMin + 5);
-
-      // Dashed vertical line
-      ctx2.save();
-      ctx2.beginPath();
-      ctx2.setLineDash([4, 3]);
-      ctx2.strokeStyle = 'rgba(26,106,168,0.55)';
-      ctx2.lineWidth = 1.5;
-      ctx2.moveTo(xPx, yTop);
-      ctx2.lineTo(xPx, yBot);
-      ctx2.stroke();
-
-      // Numbered circle at bottom
-      const r = 10;
-      ctx2.setLineDash([]);
-      ctx2.beginPath();
-      ctx2.arc(xPx, yBot + r + 2, r, 0, 2*Math.PI);
-      ctx2.fillStyle = '#1a6fa8';
-      ctx2.fill();
-      ctx2.strokeStyle = 'white';
-      ctx2.lineWidth = 1.5;
-      ctx2.stroke();
-      ctx2.fillStyle = 'white';
-      ctx2.font = 'bold 10px system-ui, sans-serif';
-      ctx2.textAlign = 'center';
-      ctx2.textBaseline = 'middle';
-      ctx2.fillText(String(wi + 1), xPx, yBot + r + 2);
-      ctx2.restore();
-    });
-  }
-};
-Chart.register(waypointLinesPlugin);
-
-// --- Layout toggle: Portrait (60/40) -> Landscape (50/50) -> Stacked ---
-const layoutModes = ['portrait', 'landscape', 'stacked'];
-const layoutLabels = ['◭ Landscape', '◭ Stacked', '◭ Portrait'];
-let layoutIdx = 0;
-document.getElementById('btn-layout').onclick = function() {
-  const layout = document.getElementById('main-layout');
-  layout.classList.remove(layoutModes[layoutIdx]);
-  layoutIdx = (layoutIdx + 1) % layoutModes.length;
-  layout.classList.add(layoutModes[layoutIdx]);
-  this.classList.toggle('active', layoutIdx !== 0);
-  this.textContent = layoutLabels[layoutIdx];
-  setTimeout(() => { map.invalidateSize(); }, 50);
-  if (profileChart) profileChart.resize();
-};
-
-});</script>
-
-<div id="modal-overlay">
-  <div id="modal-box">
-    <div class="modal-title" id="modal-title">Please wait</div>
-    <div class="modal-msg" id="modal-msg"></div>
-    <div class="modal-spinner"></div>
-    <button id="btn-modal-cancel" style="display:none;margin-top:14px;font-size:12px;padding:5px 16px;border:1px solid #c94040;border-radius:6px;background:white;color:#c94040;cursor:pointer;">Cancel</button>
-  </div>
-</div>
+</script>
+</body>
+</html>
+</script>
 </body>
 </html>
