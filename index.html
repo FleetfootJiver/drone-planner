@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v1.7 -->
+<!-- Drone Route Planner v1.8 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1010,25 +1010,34 @@ document.getElementById('btn-fpv').onclick = async () => {
   openFpvWindow();
 };
 
+function buildFpvHtml() {
+  // Read from inert template tag and unescape the protected </script> sequences.
+  return document.getElementById('fpv-template').textContent
+    .replace(/<\\/script>/g, '</script>');
+}
+
 function openFpvWindow() {
-  // Pass data to popup via window opener before the popup's script runs.
+  // Store data on window so the popup script can read it via window.opener._fpvData.
   window._fpvData = {
     grid:      _terrainGrid,
     profile:   _lastProfile,
     waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })),
   };
 
-  const popup = window.open('', 'fpv_view',
+  // Use a Blob URL so the browser loads the FPV HTML as a proper document
+  // rather than via document.write, which has intractable </script> parsing issues.
+  const blob = new Blob([buildFpvHtml()], { type: 'text/html' });
+  const url  = URL.createObjectURL(blob);
+
+  const popup = window.open(url, 'fpv_view',
     'width=1000,height=700,resizable=yes,scrollbars=no,toolbar=no,menubar=no');
-  if (!popup) { alert('Pop-up blocked — please allow pop-ups for this site.'); return; }
-
-  popup.document.open();
-  popup.document.write(buildFpvHtml());
-  popup.document.close();
-}
-
-function buildFpvHtml() {
-  return document.getElementById('fpv-template').textContent;
+  if (!popup) {
+    URL.revokeObjectURL(url);
+    alert('Pop-up blocked — please allow pop-ups for this site.');
+    return;
+  }
+  // Revoke after load — 10 s is ample for the popup to have opened.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 // Invalidate cached terrain grid and profile when waypoints change
