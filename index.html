@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v1.6 -->
+<!-- Drone Route Planner v1.7 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1210,17 +1210,19 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <span id="time-label">0 m / 0 m</span>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onload="document.getElementById('load-msg').textContent='Three.js loaded, building terrain…';" onerror="document.getElementById('load-msg').textContent='ERROR: Three.js failed to load'; document.getElementById('load-bar').style.background='#c94040';"><\/script>
 <script>
 (function() {
 'use strict';
 
 // ── Receive data from opener ────────────────────────────────────────────────
 const data     = window.opener && window.opener._fpvData;
+document.getElementById('load-msg').textContent = data ? 'Data received, initialising…' : 'ERROR: No data from opener';
 if (!data) { document.getElementById('hud').textContent = 'No route data — open from main window.'; return; }
 const grid     = data.grid;
 const profile  = data.profile;
 const wps      = data.waypoints;
+document.getElementById('load-msg').textContent = 'Data OK: ' + grid.width + 'x' + grid.height + ', loading Three.js…';
 
 const W        = grid.width;
 const H        = grid.height;
