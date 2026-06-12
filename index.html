@@ -1,3 +1,4 @@
+<!-- Drone Route Planner v1.4 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1030,11 +1031,11 @@ function buildFpvHtml() {
   // The entire FPV window as a self-contained HTML string.
   // Three.js r128 is used (matches what's available on cdnjs in this environment).
   return `<!DOCTYPE html>
-<\x3Chtml lang="en">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>FPV View — Drone Route Planner</title>
-<\x3Cstyle>
+${'<'}style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#111; color:#eee; font-family:system-ui,sans-serif;
        display:flex; flex-direction:column; height:100vh; overflow:hidden; }
@@ -1077,7 +1078,7 @@ canvas { display:block; width:100%!important; height:100%!important; }
 #load-bar { height:100%; background:#4a9eff; width:0%; transition:width 0.2s; }
 <\/style>
 </head>
-<\x3Cbody>
+<body>
 <div id="canvas-wrap">
   <canvas id="c"></canvas>
   <div id="hud">Initialising…</div>
@@ -1096,8 +1097,8 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <span id="time-label">0 m / 0 m</span>
 </div>
 
-<\x3Cscript src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
-<\x3Cscript>
+${'<'}script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>
+${'<'}script>
 (function() {
 'use strict';
 
