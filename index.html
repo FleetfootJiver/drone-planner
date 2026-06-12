@@ -339,8 +339,6 @@ async function fetchProfile(waypoints, signal) {
   return resp.json();
 }
 
-function ruleACeiling(dtm) { return dtm.map(v => v + 120); }
-
 function setStatus(msg) { document.getElementById('status-bar').textContent = msg; }
 
 function updateModal(msg) {
