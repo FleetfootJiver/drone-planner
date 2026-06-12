@@ -160,6 +160,7 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
   <button class="tb-btn" id="btn-png-profile">&#x1F4C8; Profile PNG</button>
   <button class="tb-btn" id="btn-png-both">&#x1F4F7; Both PNG</button>
   <input type="file" id="load-input" accept=".csv,.kml,.geojson,.json">
+  <button class="tb-btn" id="btn-fpv" title="Open 3D FPV view" disabled>&#x1F3A5; FPV View</button>
   <div style="width:1px;background:#ddd;align-self:stretch;margin:2px 2px;"></div>
   <button class="tb-btn" id="btn-layout" title="Toggle side-by-side layout">&#x25ED; Layout</button>
   <button class="tb-btn" id="btn-settings" title="Settings" style="margin-left:auto;">&#x2699;&#xFE0F; Settings</button>
@@ -371,8 +372,8 @@ function updateMarkers() {
       iconSize: [26,26], iconAnchor: [13,13]
     });
     const m = L.marker([wp.lat, wp.lng], { icon, draggable: true }).addTo(map);
-    m.on('dragend', e => { waypoints[i] = e.target.getLatLng(); updateRoute(); });
-    m.on('dblclick', () => { waypoints.splice(i,1); updateMarkers(); updateRoute(); });
+    m.on('dragend', e => { waypoints[i] = e.target.getLatLng(); invalidateTerrainGrid(); updateRoute(); });
+    m.on('dblclick', () => { waypoints.splice(i,1); invalidateTerrainGrid(); updateMarkers(); updateRoute(); });
     m.bindTooltip('WP' + (i+1) + '  ' + wp.lat.toFixed(5) + ', ' + wp.lng.toFixed(5),
       { direction: 'top', offset: [0,-14] });
     markers.push(m);
@@ -396,6 +397,7 @@ function updateRoute() {
 map.on('click', e => {
   if (!adding) return;
   waypoints.push(e.latlng);
+  invalidateTerrainGrid();
   updateRoute();
   setStatus('Waypoint ' + waypoints.length + ' placed. '
     + (waypoints.length >= 2 ? 'Press Calculate profile to fetch terrain.' : 'Add at least one more.'));
@@ -424,6 +426,8 @@ document.getElementById('btn-clear').onclick = () => {
   document.getElementById('ic-wps').textContent = '0';
   document.getElementById('wp-count').textContent = '0 waypoints';
   cachedBbox = null;
+  invalidateTerrainGrid();
+  setFpvReady(false);
   setStatus('Cleared. Click the map to place new waypoints.');
 };
 
@@ -817,6 +821,7 @@ async function runProfile() {
   const yMax = Math.ceil(Math.max(...allVals)/10)*10 + 20;
 
   if (profileChart) profileChart.destroy();
+  setFpvReady(true);
   profileChart = new Chart(document.getElementById('profile-chart').getContext('2d'), {
     type: 'line',
     data: { labels: distances, datasets: [
@@ -971,8 +976,51 @@ document.getElementById('btn-png-both').onclick = async () => {
   setStatus('Combined PNG saved.');
 };
 
-// Keepalive is controlled via the Settings panel (interval timer).
-// See startKeepalive() / stopKeepalive() above.
+// Enable FPV button once a profile has been calculated
+function setFpvReady(ready) {
+  document.getElementById('btn-fpv').disabled = !ready;
+}
+
+// ── Terrain grid fetch (for FPV view) ──────────────────────────────────────
+let _terrainGrid = null;   // cached after first fetch for current route
+
+async function fetchTerrainGrid() {
+  if (!API_BASE || waypoints.length < 2) return null;
+  const resp = await fetch(API_BASE + '/api/terrain_grid', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) })
+  });
+  if (!resp.ok) throw new Error('terrain_grid: ' + resp.status);
+  return await resp.json();
+}
+
+document.getElementById('btn-fpv').onclick = async () => {
+  // FPV window implementation to follow — for now fetch the grid and log it
+  if (!_terrainGrid) {
+    try {
+      document.getElementById('btn-fpv').textContent = '⏳ Loading…';
+      _terrainGrid = await fetchTerrainGrid();
+      document.getElementById('btn-fpv').textContent = '🎥 FPV View';
+    } catch(e) {
+      document.getElementById('btn-fpv').textContent = '🎥 FPV View';
+      alert('Failed to load terrain data: ' + e.message);
+      return;
+    }
+  }
+  // TODO: open FPV window with _terrainGrid
+  console.log('Terrain grid ready:',
+    _terrainGrid.width + 'x' + _terrainGrid.height + ' px, ' +
+    _terrainGrid.bounds_osgb.join(', '));
+  alert('Terrain grid loaded: ' + _terrainGrid.width + '×' + _terrainGrid.height +
+        ' px\nBounds (OSGB): ' + _terrainGrid.bounds_osgb.map(Math.round).join(', ') +
+        '\nFPV window coming in next session.');
+};
+
+// Invalidate cached terrain grid when waypoints change
+function invalidateTerrainGrid() { _terrainGrid = null; }
+
+
 
 // --- Waypoint lines Chart.js plugin (registered once at top level) --------
 const waypointLinesPlugin = {
