@@ -1,4 +1,4 @@
-<!-- FPV View v1.2 -->
+<!-- FPV View v1.3 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -80,7 +80,8 @@ const profile  = data.profile;
 const wps      = data.waypoints;
 document.getElementById('load-msg').textContent = 'Data OK: ' + grid.width + 'x' + grid.height + ', loading Three.js…';
 
-const W        = grid.width;
+const terrainMode = data.terrainMode || 'brown';
+const osmZoom     = data.osmZoom     || 17;
 const H        = grid.height;
 const [gMinX, gMinY, gMaxX, gMaxY] = grid.bounds_osgb;
 const RES      = grid.resolution_m;          // 1.0 m/px
@@ -213,9 +214,170 @@ geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
 geo.setIndex(new THREE.BufferAttribute(indices, 1));
 geo.computeVertexNormals();
 
-const mat  = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
-const mesh = new THREE.Mesh(geo, mat);
+const mat  = new THREE.MeshLambertMaterial({
+  vertexColors: terrainMode === 'brown',
+  side: THREE.FrontSide
+});
 scene.add(mesh);
+
+// ── OSM texture loading ──────────────────────────────────────────────────────
+// Only runs when terrainMode === 'osm'.
+// Converts grid OSGB bounds to WGS84, computes tile grid, fetches tiles in
+// parallel, stitches onto a canvas sized to the terrain mesh, applies as texture.
+
+function osmLng2tile(lng, z)  { return Math.floor((lng + 180) / 360 * Math.pow(2, z)); }
+function osmLat2tile(lat, z)  {
+  const r = lat * Math.PI / 180;
+  return Math.floor((1 - Math.log(Math.tan(r) + 1/Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z));
+}
+function osmTile2lng(x, z)    { return x / Math.pow(2, z) * 360 - 180; }
+function osmTile2lat(y, z)    {
+  const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z);
+  return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+// Rough OSGB → WGS84 inverse (same affine as main page, sufficient for tile counting)
+function osgbToWgs84Approx(e, n) {
+  const refE=400000, refN=650000, refLat=55.5, refLng=-3.5;
+  const mPerLat=111320, mPerLng=111320*Math.cos(51.5*Math.PI/180);
+  return { lat: refLat+(n-refN)/mPerLat, lng: refLng+(e-refE)/mPerLng };
+}
+
+async function loadOsmTexture() {
+  setLoad(92, 'Fetching OSM tiles…');
+  const sw = osgbToWgs84Approx(gMinX, gMinY);
+  const ne = osgbToWgs84Approx(gMaxX, gMaxY);
+  const z  = osmZoom;
+
+  const tx0 = osmLng2tile(sw.lng, z), tx1 = osmLng2tile(ne.lng, z);
+  const ty0 = osmLat2tile(ne.lat, z), ty1 = osmLat2tile(sw.lat, z);
+  const nTx = tx1-tx0+1, nTy = ty1-ty0+1;
+  const totalTiles = nTx * nTy;
+
+  // Tile coverage in WGS84
+  const tileSW_lng = osmTile2lng(tx0,   z),  tileSW_lat = osmTile2lat(ty1+1, z);
+  const tileNE_lng = osmTile2lng(tx1+1, z),  tileNE_lat = osmTile2lat(ty0,   z);
+
+  // Canvas: 256*nTx wide × 256*nTy tall (full tile grid)
+  const TILE_PX = 256;
+  const cvs = document.createElement('canvas');
+  cvs.width  = nTx * TILE_PX;
+  cvs.height = nTy * TILE_PX;
+  const ctx  = cvs.getContext('2d');
+  ctx.fillStyle = '#aaa';
+  ctx.fillRect(0, 0, cvs.width, cvs.height);
+
+  // Fetch all tiles in parallel (OSM allows this for light use)
+  const fetches = [];
+  for (let ty = ty0; ty <= ty1; ty++) {
+    for (let tx = tx0; tx <= tx1; tx++) {
+      const col = tx - tx0, row = ty - ty0;
+      // Use a subdomain (a/b/c) to distribute load
+      const sub = ['a','b','c'][(tx+ty) % 3];
+      const url = `https://${sub}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`;
+      fetches.push(
+        new Promise(resolve => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload  = () => { ctx.drawImage(img, col*TILE_PX, row*TILE_PX); resolve(); };
+          img.onerror = () => resolve();   // skip failed tiles gracefully
+          img.src = url;
+        })
+      );
+    }
+  }
+  await Promise.all(fetches);
+
+  // Now crop/transform the stitched tile canvas to exactly match the terrain grid.
+  // The tile canvas covers [tileSW_lng..tileNE_lng] × [tileSW_lat..tileNE_lat].
+  // The terrain grid covers [sw.lng..ne.lng] × [sw.lat..ne.lat].
+  // We need to map OSGB world X (0..W-1) → terrain texture U (0..1)
+  // and OSGB world Z (0..H-1, south=0) → terrain texture V (0..1, bottom=0 in Three.js)
+
+  // Build final texture canvas sized to terrain grid
+  const texCvs = document.createElement('canvas');
+  texCvs.width  = W;
+  texCvs.height = H;
+  const texCtx  = texCvs.getContext('2d');
+
+  // For each terrain pixel column, compute the source X in the tile canvas
+  // X in world = col metres east of gMinX → OSGB easting = gMinX + col
+  // → lng = osgbToWgs84Approx(gMinX+col, gMinY).lng  (Y doesn't matter for lng)
+  // → tile canvas X = (lng - tileSW_lng)/(tileNE_lng-tileSW_lng) * cvs.width
+  // Do this as a drawImage transform — compute src rect corners and use drawImage
+
+  const srcX0 = (sw.lng - tileSW_lng) / (tileNE_lng - tileSW_lng) * cvs.width;
+  const srcX1 = (ne.lng - tileSW_lng) / (tileNE_lng - tileSW_lng) * cvs.width;
+  // Tile Y: tile rows go north→south (ty0=north), our terrain rows go south→north
+  // texCvs row 0 = southernmost = sw.lat
+  // In tile canvas: lat → tile_y = (tileNE_lat-lat)/(tileNE_lat-tileSW_lat)*cvs.height
+  const srcY_south = (tileNE_lat - sw.lat) / (tileNE_lat - tileSW_lat) * cvs.height;
+  const srcY_north = (tileNE_lat - ne.lat) / (tileNE_lat - tileSW_lat) * cvs.height;
+
+  // Draw the cropped region into the texture canvas.
+  // texCvs row 0 = south, row H-1 = north.
+  // drawImage: flip vertically since tile canvas has north at top.
+  texCtx.save();
+  texCtx.translate(0, texCvs.height);
+  texCtx.scale(1, -1);
+  texCtx.drawImage(cvs,
+    srcX0, srcY_north,             // src top-left (north side of terrain)
+    srcX1-srcX0, srcY_south-srcY_north,  // src width/height
+    0, 0, W, H                     // dst: full texture canvas
+  );
+  texCtx.restore();
+
+  // Apply as texture to terrain mesh
+  const tex = new THREE.CanvasTexture(texCvs);
+  tex.flipY = false;    // our canvas is already Y-flipped correctly
+  // Build UV coordinates: each vertex maps linearly to (col/W, row/H)
+  const uvs = new Float32Array(nVerts * 2);
+  for (let row = 0; row < H; row++) {
+    for (let col = 0; col < W; col++) {
+      const i = row * W + col;
+      uvs[i*2]   = col / (W-1);
+      uvs[i*2+1] = row / (H-1);
+    }
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  mat.map          = tex;
+  mat.vertexColors = false;
+  mat.needsUpdate  = true;
+
+  // DSM overlay: keep green vertex colour on DSM vertices by adding a second
+  // transparent mesh using only the DSM-elevated vertices
+  // (DSM colours are already in the vertex colour buffer; reuse it for an overlay)
+  if (dsmFlat) {
+    const dsmMat = new THREE.MeshLambertMaterial({
+      vertexColors: true, transparent: true, opacity: 0.75,
+      side: THREE.FrontSide
+    });
+    // Build a separate colour buffer: transparent on ground, green on DSM
+    const overlayColors = new Float32Array(nVerts * 3);
+    for (let row = 0; row < H; row++) {
+      for (let col = 0; col < W; col++) {
+        const i = row * W + col;
+        const dtm = isFinite(dtmFlat[i]) ? dtmFlat[i] : minDtm;
+        const dsm = (dsmFlat && isFinite(dsmFlat[i])) ? dsmFlat[i] : dtm;
+        const useDsm = (dsm - dtm) > DSM_THRESHOLD;
+        overlayColors[i*3]   = useDsm ? COL_DSM.r : 0;
+        overlayColors[i*3+1] = useDsm ? COL_DSM.g : 0;
+        overlayColors[i*3+2] = useDsm ? COL_DSM.b : 0;
+      }
+    }
+    // Reuse the same geometry with a different material
+    const dsmGeo = geo.clone();
+    dsmGeo.setAttribute('color', new THREE.BufferAttribute(overlayColors, 3));
+    // Raise DSM mesh very slightly to avoid z-fighting
+    const dsmMesh = new THREE.Mesh(dsmGeo, dsmMat);
+    dsmMesh.position.y = 0.05;
+    scene.add(dsmMesh);
+  }
+
+  setLoad(100, 'Ready.');
+  document.getElementById('loading').style.display = 'none';
+  requestAnimationFrame(animate);
+}
 
 setLoad(80, 'Building flight path…');
 
@@ -396,11 +558,22 @@ scrubber.addEventListener('input', () => {
 });
 
 // ── Hide loading overlay and start ───────────────────────────────────────────
-setLoad(100, 'Ready.');
-setTimeout(() => {
-  document.getElementById('loading').style.display = 'none';
-  requestAnimationFrame(animate);
-}, 200);
+if (terrainMode === 'osm') {
+  // OSM path: tile loading is async, it will hide the overlay and start animation
+  loadOsmTexture().catch(err => {
+    console.error('[FPV] OSM texture failed:', err);
+    document.getElementById('load-msg').textContent = 'OSM load failed — showing brown terrain.';
+    setLoad(100, 'Ready (OSM failed).');
+    document.getElementById('loading').style.display = 'none';
+    requestAnimationFrame(animate);
+  });
+} else {
+  setLoad(100, 'Ready.');
+  setTimeout(() => {
+    document.getElementById('loading').style.display = 'none';
+    requestAnimationFrame(animate);
+  }, 200);
+}
 
 } catch(err) {
   console.error('[FPV] Fatal error:', err);

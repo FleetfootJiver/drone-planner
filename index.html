@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.1 -->
+<!-- Drone Route Planner v2.2 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -142,7 +142,8 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 .sg-row input[type=checkbox] { margin: 0; cursor: pointer; accent-color: #1a6fa8; }
 .sg-row label { cursor: pointer; }
 .sg-indent { padding-left: 16px; }
-.sg-disabled { opacity: 0.4; pointer-events: none; }
+.sg-tile-count { font-size:10px; color:#999; margin-left:4px; }
+.sg-zoom-too-many { opacity:0.4; pointer-events:none; }
 </style>
 </head>
 <body>
@@ -206,7 +207,20 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
   </div>
 
   <div class="sg-section">
-    <div class="sg-section-title">Save / load file format</div>
+    <div class="sg-section-title">FPV terrain texture</div>
+    <div class="sg-row"><input type="radio" name="sg-terrain" id="sg-terrain-brown" value="brown" checked><label for="sg-terrain-brown">Brown (solid colour)</label></div>
+    <div class="sg-row"><input type="radio" name="sg-terrain" id="sg-terrain-osm"   value="osm"><label for="sg-terrain-osm">OpenStreetMap tiles</label></div>
+    <div class="sg-section-title sg-indent" style="margin-top:6px;">OSM zoom level</div>
+    <div id="sg-zoom-rows">
+      <div class="sg-row sg-indent" id="sg-zoom-row-15"><input type="radio" name="sg-osmzoom" id="sg-osmzoom-15" value="15"><label for="sg-osmzoom-15">15 — wide area</label><span class="sg-tile-count" id="sg-tc-15"></span></div>
+      <div class="sg-row sg-indent" id="sg-zoom-row-16"><input type="radio" name="sg-osmzoom" id="sg-osmzoom-16" value="16"><label for="sg-osmzoom-16">16 — regional</label><span class="sg-tile-count" id="sg-tc-16"></span></div>
+      <div class="sg-row sg-indent" id="sg-zoom-row-17"><input type="radio" name="sg-osmzoom" id="sg-osmzoom-17" value="17" checked><label for="sg-osmzoom-17">17 — local</label><span class="sg-tile-count" id="sg-tc-17"></span></div>
+      <div class="sg-row sg-indent" id="sg-zoom-row-18"><input type="radio" name="sg-osmzoom" id="sg-osmzoom-18" value="18"><label for="sg-osmzoom-18">18 — street</label><span class="sg-tile-count" id="sg-tc-18"></span></div>
+      <div class="sg-row sg-indent" id="sg-zoom-row-19"><input type="radio" name="sg-osmzoom" id="sg-osmzoom-19" value="19"><label for="sg-osmzoom-19">19 — detail</label><span class="sg-tile-count" id="sg-tc-19"></span></div>
+    </div>
+  </div>
+
+
     <div class="sg-row"><input type="radio" name="sg-fmt" id="sg-fmt-csv" value="csv" checked><label for="sg-fmt-csv">CSV</label></div>
     <div class="sg-row"><input type="radio" name="sg-fmt" id="sg-fmt-kml" value="kml"><label for="sg-fmt-kml">KML</label></div>
     <div class="sg-row"><input type="radio" name="sg-fmt" id="sg-fmt-geojson" value="geojson"><label for="sg-fmt-geojson">GeoJSON</label></div>
@@ -977,7 +991,90 @@ document.getElementById('btn-png-both').onclick = async () => {
   setStatus('Combined PNG saved.');
 };
 
-// Enable FPV button once waypoints exist (profile will be fetched on demand)
+// ── FPV terrain texture settings ───────────────────────────────────────────
+function getFpvTerrainMode() {
+  return document.querySelector('input[name="sg-terrain"]:checked').value;
+}
+function getFpvOsmZoom() {
+  return parseInt(document.querySelector('input[name="sg-osmzoom"]:checked').value, 10);
+}
+
+// OSM tile coordinate helpers (Slippy Map convention)
+function osmLng2tile(lng, z)  { return Math.floor((lng + 180) / 360 * Math.pow(2, z)); }
+function osmLat2tile(lat, z)  {
+  const r = lat * Math.PI / 180;
+  return Math.floor((1 - Math.log(Math.tan(r) + 1/Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z));
+}
+function osmTileCount(minLat, minLng, maxLat, maxLng, zoom) {
+  const tx0 = osmLng2tile(minLng, zoom), tx1 = osmLng2tile(maxLng, zoom);
+  const ty0 = osmLat2tile(maxLat, zoom), ty1 = osmLat2tile(minLat, zoom);
+  return { tx0, ty0, tx1, ty1, nx: tx1-tx0+1, ny: ty1-ty0+1, total: (tx1-tx0+1)*(ty1-ty0+1) };
+}
+
+// Approximate OSGB bounds → WGS84 for tile count calculation.
+// Uses the Helmert inverse — accurate enough for counting tiles.
+function osgbBoundsToWgs84(bounds_osgb) {
+  // We'll use pyproj-equivalent JS inline (simplified reverse TM)
+  // Good enough: linear scale from a UK reference point
+  // 1° lat ≈ 111320m, 1° lng ≈ 111320*cos(lat) at UK lat ~51°
+  const [minE, minN, maxE, maxN] = bounds_osgb;
+  const refE=400000, refN=650000, refLat=55.5, refLng=-3.5;
+  const mPerLat = 111320;
+  const mPerLng = 111320 * Math.cos(51.5 * Math.PI / 180);
+  const minLat = refLat + (minN - refN) / mPerLat;
+  const maxLat = refLat + (maxN - refN) / mPerLat;
+  const minLng = refLng + (minE - refE) / mPerLng;
+  const maxLng = refLng + (maxE - refE) / mPerLng;
+  return { minLat, minLng, maxLat, maxLng };
+}
+
+const MAX_OSM_TILES = 64;
+
+function updateOsmZoomUI() {
+  if (!_terrainGrid) return;
+  const wgs = osgbBoundsToWgs84(_terrainGrid.bounds_osgb);
+  let bestValid = 15;
+  for (let z = 15; z <= 19; z++) {
+    const { total } = osmTileCount(wgs.minLat, wgs.minLng, wgs.maxLat, wgs.maxLng, z);
+    const row   = document.getElementById(`sg-zoom-row-${z}`);
+    const badge = document.getElementById(`sg-tc-${z}`);
+    const tooMany = total > MAX_OSM_TILES;
+    row.classList.toggle('sg-zoom-too-many', tooMany);
+    badge.textContent = `(${total} tiles)`;
+    if (!tooMany) bestValid = z;
+  }
+  // If current selection is greyed out, move to highest valid zoom
+  const cur = getFpvOsmZoom();
+  const { total: curTotal } = osmTileCount(wgs.minLat, wgs.minLng, wgs.maxLat, wgs.maxLng, cur);
+  if (curTotal > MAX_OSM_TILES) {
+    const radio = document.getElementById(`sg-osmzoom-${bestValid}`);
+    if (radio) radio.checked = true;
+  }
+}
+
+// Update zoom UI whenever the terrain grid is fetched
+const _origFetchTerrainGrid = fetchTerrainGrid;
+async function fetchTerrainGrid() {
+  const result = await _origFetchTerrainGrid();
+  if (result) setTimeout(updateOsmZoomUI, 0);
+  return result;
+}
+
+// Also update when settings panel opens (grid may already be loaded)
+document.getElementById('btn-settings').addEventListener('click', () => {
+  if (_terrainGrid) updateOsmZoomUI();
+});
+
+// OSM zoom rows are disabled when brown mode is selected
+function updateOsmZoomDisabled() {
+  const osm = getFpvTerrainMode() === 'osm';
+  document.getElementById('sg-zoom-rows').classList.toggle('sg-disabled', !osm);
+}
+document.querySelectorAll('input[name="sg-terrain"]').forEach(r =>
+  r.addEventListener('change', updateOsmZoomDisabled));
+updateOsmZoomDisabled();
+
+
 function setFpvReady(ready) {
   document.getElementById('btn-fpv').disabled = !ready;
 }
@@ -1032,9 +1129,11 @@ document.getElementById('btn-fpv').onclick = async () => {
 function openFpvWindow() {
   // Store data on window so fpv.html can read it via window.opener._fpvData.
   window._fpvData = {
-    grid:      _terrainGrid,
-    profile:   _lastProfile,
-    waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })),
+    grid:        _terrainGrid,
+    profile:     _lastProfile,
+    waypoints:   waypoints.map(w => ({ lat: w.lat, lng: w.lng })),
+    terrainMode: getFpvTerrainMode(),
+    osmZoom:     getFpvOsmZoom(),
   };
 
   _fpvPopup = window.open('fpv.html', 'fpv_view',
