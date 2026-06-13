@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.0 -->
+<!-- Drone Route Planner v2.1 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -387,8 +387,10 @@ function updateRoute() {
     routeLine = L.polyline(waypoints.map(w => [w.lat, w.lng]),
       { color: '#1a6fa8', weight: 2, dashArray: '6 4', opacity: 0.8, renderer: canvasRenderer }).addTo(map);
     document.getElementById('ic-dist').textContent = Math.round(totalRouteLength(waypoints));
+    setFpvReady(true);
   } else {
     document.getElementById('ic-dist').textContent = '—';
+    setFpvReady(false);
   }
   updateMarkers();
 }
@@ -821,7 +823,6 @@ async function runProfile() {
 
   _lastProfile = profile;
   if (profileChart) profileChart.destroy();
-  setFpvReady(true);
   profileChart = new Chart(document.getElementById('profile-chart').getContext('2d'), {
     type: 'line',
     data: { labels: distances, datasets: [
@@ -976,13 +977,14 @@ document.getElementById('btn-png-both').onclick = async () => {
   setStatus('Combined PNG saved.');
 };
 
-// Enable FPV button once a profile has been calculated
+// Enable FPV button once waypoints exist (profile will be fetched on demand)
 function setFpvReady(ready) {
   document.getElementById('btn-fpv').disabled = !ready;
 }
 
 let _lastProfile  = null;   // most recent successful profile response
 let _terrainGrid  = null;   // cached terrain grid for current route
+let _fpvPopup     = null;   // reference to the open FPV popup window, if any
 
 async function fetchTerrainGrid() {
   if (!API_BASE || waypoints.length < 2) return null;
@@ -996,17 +998,34 @@ async function fetchTerrainGrid() {
 }
 
 document.getElementById('btn-fpv').onclick = async () => {
+  const btn = document.getElementById('btn-fpv');
+
+  // If the popup is already open and data is current, just focus it
+  if (_fpvPopup && !_fpvPopup.closed && _lastProfile && _terrainGrid) {
+    _fpvPopup.focus();
+    return;
+  }
+
+  // Auto-recalculate profile if waypoints have changed since last calculation
+  if (!_lastProfile) {
+    setStatus('Calculating profile for FPV view…');
+    await runProfile();
+    if (!_lastProfile) return;   // runProfile failed or was cancelled
+  }
+
+  // Fetch terrain grid if not cached
   if (!_terrainGrid) {
     try {
-      document.getElementById('btn-fpv').textContent = '⏳ Loading…';
+      btn.textContent = '⏳ Loading…';
       _terrainGrid = await fetchTerrainGrid();
-      document.getElementById('btn-fpv').textContent = '🎥 FPV View';
+      btn.textContent = '🎥 FPV View';
     } catch(e) {
-      document.getElementById('btn-fpv').textContent = '🎥 FPV View';
+      btn.textContent = '🎥 FPV View';
       alert('Failed to load terrain data: ' + e.message);
       return;
     }
   }
+
   openFpvWindow();
 };
 
@@ -1018,12 +1037,14 @@ function openFpvWindow() {
     waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })),
   };
 
-  const popup = window.open('fpv.html', 'fpv_view',
+  _fpvPopup = window.open('fpv.html', 'fpv_view',
     'width=1000,height=700,resizable=yes,scrollbars=no,toolbar=no,menubar=no');
-  if (!popup) {
+  if (!_fpvPopup) {
     alert('Pop-up blocked — please allow pop-ups for this site.');
     return;
   }
+  // If the named window was already open, reload it with the fresh data
+  _fpvPopup.location.href = 'fpv.html';
 }
 
 // Invalidate cached terrain grid and profile when waypoints change
@@ -1031,6 +1052,7 @@ function invalidateTerrainGrid() {
   _terrainGrid = null;
   _lastProfile = null;
 }
+
 
 
 // --- Waypoint lines Chart.js plugin (registered once at top level) --------
