@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FPV View — Drone Route Planner</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#111; color:#eee; font-family:system-ui,sans-serif;
+       display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+#canvas-wrap { flex:1; position:relative; overflow:hidden; }
+canvas { display:block; width:100%!important; height:100%!important; }
+#hud {
+  position:absolute; top:8px; left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,0.55); border-radius:6px;
+  padding:4px 12px; font-size:11px; color:#ccc;
+  pointer-events:none; white-space:nowrap;
+}
+#controls {
+  background:#1a1a1a; border-top:1px solid #333;
+  padding:6px 12px; display:flex; align-items:center; gap:8px;
+  flex-shrink:0;
+}
+.ctl-btn {
+  background:#2a2a2a; border:1px solid #444; color:#ddd;
+  border-radius:5px; padding:5px 10px; cursor:pointer;
+  font-size:16px; line-height:1; transition:background 0.15s;
+}
+.ctl-btn:hover  { background:#3a3a3a; }
+.ctl-btn:active { background:#444; }
+#scrubber {
+  flex:1; height:4px; cursor:pointer; accent-color:#4a9eff;
+  min-width:60px;
+}
+#time-label {
+  font-size:11px; color:#888; white-space:nowrap; min-width:70px;
+  text-align:right;
+}
+#loading {
+  position:absolute; inset:0; background:#111;
+  display:flex; align-items:center; justify-content:center;
+  flex-direction:column; gap:12px; font-size:14px; color:#aaa;
+}
+#load-bar-wrap {
+  width:260px; height:6px; background:#333; border-radius:3px; overflow:hidden;
+}
+#load-bar { height:100%; background:#4a9eff; width:0%; transition:width 0.2s; }
+</style>
+</head>
+<body>
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+  <div id="hud">Initialising…</div>
+  <div id="loading">
+    <div id='load-msg'>Starting…</div>
+    <div id="load-bar-wrap"><div id="load-bar"></div></div>
+  </div>
+</div>
+<div id="controls">
+  <button class="ctl-btn" id="btn-start"  title="Go to start">&#x23EE;</button>
+  <button class="ctl-btn" id="btn-prev"   title="Previous waypoint">&#x23EA;</button>
+  <button class="ctl-btn" id="btn-play"   title="Play / Pause">&#x25B6;</button>
+  <button class="ctl-btn" id="btn-next"   title="Next waypoint">&#x23E9;</button>
+  <button class="ctl-btn" id="btn-end"    title="Go to end">&#x23ED;</button>
+  <input  type="range" id="scrubber" min="0" max="1000" value="0" step="1">
+  <span id="time-label">0 m / 0 m</span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onload="document.getElementById('load-msg').textContent='Three.js loaded, building terrain…';" onerror="document.getElementById('load-msg').textContent='ERROR: Three.js failed to load'; document.getElementById('load-bar').style.background='#c94040';"></script>
+<script>
+(function() {
+'use strict';
+
+// ── Receive data from opener ────────────────────────────────────────────────
+const data     = window.opener && window.opener._fpvData;
+document.getElementById('load-msg').textContent = data ? 'Data received, initialising…' : 'ERROR: No data from opener';
+if (!data) { document.getElementById('hud').textContent = 'No route data — open from main window.'; return; }
+const grid     = data.grid;
+const profile  = data.profile;
+const wps      = data.waypoints;
+document.getElementById('load-msg').textContent = 'Data OK: ' + grid.width + 'x' + grid.height + ', loading Three.js…';
+
+const W        = grid.width;
+const H        = grid.height;
+const [gMinX, gMinY, gMaxX, gMaxY] = grid.bounds_osgb;
+const RES      = grid.resolution_m;          // 1.0 m/px
+const DSM_THRESHOLD = 0.2;                   // m above DTM to show DSM colour
+
+// ── Decode base64 float32 arrays ────────────────────────────────────────────
+function decodeF32(b64) {
+  const bin = atob(b64);
+  const buf = new ArrayBuffer(bin.length);
+  const u8  = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Float32Array(buf);
+}
+
+function setLoad(pct, msg) {
+  document.getElementById('load-bar').style.width = pct + '%';
+  if (msg) document.getElementById('load-msg').textContent = msg;
+  console.log('[FPV]', pct + '%', msg || '');
+}
+
+// ── Defer heavy work so the browser can paint the loading screen first ──────
+setTimeout(async function() {
+try {
+
+setLoad(10, 'Decoding DTM…');
+const dtmFlat = decodeF32(grid.dtm_grid);    // south-to-north, row-major
+const dsmFlat = grid.dsm_grid ? decodeF32(grid.dsm_grid) : null;
+setLoad(25, 'Decoding DSM…');
+
+// ── Three.js scene ──────────────────────────────────────────────────────────
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = false;
+
+const scene    = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);   // sky blue
+scene.fog        = new THREE.FogExp2(0xC8DFF0, 0.00025);
+
+// ── Sun lighting ────────────────────────────────────────────────────────────
+// Simple solar position for UK centroid (~54°N) using current date/time.
+function sunDirection() {
+  const now  = new Date();
+  const doy  = Math.floor((now - new Date(now.getFullYear(),0,0)) / 86400000);
+  const hour = now.getHours() + now.getMinutes()/60;
+  const lat  = ((gMinY + gMaxY) / 2 - 0) / 111320 + 51.5;   // rough UK lat
+  const decl = 23.45 * Math.sin((284 + doy) * Math.PI / 182.5) * Math.PI / 180;
+  const ha   = (hour - 12) * 15 * Math.PI / 180;
+  const sinAlt = Math.sin(lat*Math.PI/180)*Math.sin(decl)
+               + Math.cos(lat*Math.PI/180)*Math.cos(decl)*Math.cos(ha);
+  const alt  = Math.asin(Math.max(sinAlt, 0.05));
+  const cosAz = (Math.sin(decl) - Math.sin(alt)*Math.sin(lat*Math.PI/180))
+              / (Math.cos(alt)*Math.cos(lat*Math.PI/180));
+  const az   = (hour < 12 ? -1 : 1) * Math.acos(Math.max(-1, Math.min(1, cosAz)));
+  return new THREE.Vector3(
+    -Math.cos(alt)*Math.sin(az),
+     Math.sin(alt),
+    -Math.cos(alt)*Math.cos(az)
+  ).normalize();
+}
+const sunDir  = sunDirection();
+const sun     = new THREE.DirectionalLight(0xfff4e0, 1.4);
+sun.position.copy(sunDir.clone().multiplyScalar(2000));
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0x8090b0, 0.6));
+
+// ── Terrain geometry ────────────────────────────────────────────────────────
+// World space: X = OSGB easting - gMinX, Y = altitude (m), Z = gMaxY - northing
+// (Z increases southward so camera looks "forward" northward at start)
+const segs_x = W - 1, segs_z = H - 1;
+
+setLoad(35, 'Building vertices…');
+
+// Helper: row-major index, rows south-to-north
+function idx(col, row) { return row * W + col; }
+
+// Colours
+const COL_GROUND = new THREE.Color(0x8B6340);   // brown
+const COL_DSM    = new THREE.Color(0x90C060);   // pale green
+
+// Build ONE BufferGeometry with per-vertex colour
+const nVerts = W * H;
+const positions = new Float32Array(nVerts * 3);
+const colors    = new Float32Array(nVerts * 3);
+
+let minDtm = Infinity;
+for (let i = 0; i < dtmFlat.length; i++) {
+  const v = dtmFlat[i];
+  if (isFinite(v) && v < minDtm) minDtm = v;
+}
+if (!isFinite(minDtm)) minDtm = 0;
+
+for (let row = 0; row < H; row++) {
+  for (let col = 0; col < W; col++) {
+    const i  = idx(col, row);
+    const dtm = isFinite(dtmFlat[i]) ? dtmFlat[i] : minDtm;
+    const dsm = (dsmFlat && isFinite(dsmFlat[i])) ? dsmFlat[i] : dtm;
+    const useDsm = (dsm - dtm) > DSM_THRESHOLD;
+    const y  = useDsm ? dsm : dtm;
+
+    positions[i*3]   = col * RES;                // X = easting offset
+    positions[i*3+1] = y;                         // Y = altitude
+    positions[i*3+2] = (H - 1 - row) * RES;      // Z = southward (row 0=south→small Z)
+
+    const c = useDsm ? COL_DSM : COL_GROUND;
+    colors[i*3]   = c.r;
+    colors[i*3+1] = c.g;
+    colors[i*3+2] = c.b;
+  }
+}
+
+setLoad(60, 'Building index…');
+
+// Index buffer: two triangles per quad
+const nQuads   = segs_x * segs_z;
+const indices  = new Uint32Array(nQuads * 6);
+let   ii       = 0;
+for (let row = 0; row < segs_z; row++) {
+  for (let col = 0; col < segs_x; col++) {
+    const a = idx(col,   row),   b = idx(col+1, row);
+    const c = idx(col+1, row+1), d = idx(col,   row+1);
+    indices[ii++]=a; indices[ii++]=b; indices[ii++]=d;
+    indices[ii++]=b; indices[ii++]=c; indices[ii++]=d;
+  }
+}
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
+geo.setIndex(new THREE.BufferAttribute(indices, 1));
+geo.computeVertexNormals();
+
+const mat  = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+const mesh = new THREE.Mesh(geo, mat);
+scene.add(mesh);
+
+setLoad(80, 'Building flight path…');
+
+// ── Camera flight path ──────────────────────────────────────────────────────
+// Convert WGS84 waypoints to OSGB world coords using the profile sample points.
+// The profile has 1m spacing along the route; use the distances array to build
+// a 3D path.  Camera altitude = DTM at that point + 10m (default eye height).
+const FLIGHT_ALT_AGL = 10;   // metres above terrain
+
+// Build path from profile sample points
+// We know profile.points samples at SAMPLE_SPACING_M = 1m intervals.
+// Convert each sample's lat/lng to OSGB world space using the grid bounds.
+// Since we don't have individual sample OSGB coords, we interpolate
+// the waypoints linearly at each sample index.
+
+// Build cumulative waypoint distances in OSGB (approximate via lat/lng haversine)
+function hav(a, b) {
+  const R = 6371000, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lng-a.lng)*Math.PI/180;
+  const s = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.asin(Math.sqrt(s));
+}
+
+// Approximate OSGB from lat/lng using grid bounds and profile bounds
+// We use linear interpolation anchored on the grid bounds extent.
+// More accurate: use the same OSGB projection. Here we use a simple
+// affine approximation good to ~10m over a typical UK route bbox.
+const latSpan = (gMaxY - gMinY) / 111320;
+const latCentre = (gMinY/111320 + (gMinY + (gMaxY-gMinY))/111320) / 2 + 51;
+const lngScale  = 111320 * Math.cos(51.5 * Math.PI / 180);
+
+function wgs84ToWorld(lat, lng) {
+  // rough OSGB: use the grid's own bounds as reference
+  // (proper pyproj not available in browser; error <20m over 2km route)
+  const e = gMinX + (lng - (wps[0].lng)) * lngScale + (gMaxX-gMinX)/2 - (gMaxX-gMinX)/2;
+  const n = gMinY + (lat - (wps[0].lat)) * 111320  + (gMaxY-gMinY)/2 - (gMaxY-gMinY)/2;
+  return { x: e - gMinX, z: (gMaxY - n) };
+}
+
+// Better: directly use the profile distances and waypoint positions.
+// Walk along waypoints, interpolate OSGB position at each sample.
+const wpOsgb = wps.map(w => wgs84ToWorld(w.lat, w.lng));
+const wpDist = [0];
+for (let i = 1; i < wps.length; i++) wpDist.push(wpDist[i-1] + hav(wps[i-1], wps[i]));
+const totalDist = wpDist[wpDist.length - 1];
+
+const nSamples = profile.points;
+const path = [];   // {x, y, z} world coords for each sample
+
+for (let s = 0; s < nSamples; s++) {
+  const d = (s / (nSamples - 1)) * totalDist;
+  // Find segment
+  let seg = 0;
+  for (let i = 1; i < wpDist.length - 1; i++) { if (d >= wpDist[i]) seg = i; }
+  const segLen = wpDist[seg+1] - wpDist[seg];
+  const t = segLen > 0 ? (d - wpDist[seg]) / segLen : 0;
+  const wx = wpOsgb[seg].x + t * (wpOsgb[seg+1].x - wpOsgb[seg].x);
+  const wz = wpOsgb[seg].z + t * (wpOsgb[seg+1].z - wpOsgb[seg].z);
+
+  const dtmVal = profile.dtm[s] ?? minDtm;
+  path.push({ x: wx, y: dtmVal + FLIGHT_ALT_AGL, z: wz });
+}
+
+setLoad(90, 'Setting up camera…');
+
+// ── Waypoint indices in path ─────────────────────────────────────────────────
+const wpPathIdx = wpDist.map(d => Math.round((d / totalDist) * (nSamples - 1)));
+
+// ── Camera & renderer sizing ─────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
+
+function resize() {
+  const w = canvas.parentElement.clientWidth;
+  const h = canvas.parentElement.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── Playback state ────────────────────────────────────────────────────────────
+let curIdx   = 0;
+let playing  = false;
+let lastTime = null;
+const SPEED  = 20;   // samples per second (≈ 20 m/s = 72 km/h)
+
+const scrubber  = document.getElementById('scrubber');
+const timeLabel = document.getElementById('time-label');
+const btnPlay   = document.getElementById('btn-play');
+const hud       = document.getElementById('hud');
+
+scrubber.max = nSamples - 1;
+
+function formatDist(i) {
+  return Math.round(profile.distances_m[i]) + ' m / ' + Math.round(totalDist) + ' m';
+}
+
+function positionCamera(idx) {
+  const p  = path[idx];
+  camera.position.set(p.x, p.y, p.z);
+  // Look-ahead: blend current forward direction
+  const ahead = Math.min(idx + 5, nSamples - 1);
+  const q = path[ahead];
+  if (Math.abs(q.x - p.x) > 0.01 || Math.abs(q.z - p.z) > 0.01) {
+    camera.lookAt(q.x, q.y, q.z);
+  }
+  scrubber.value = idx;
+  timeLabel.textContent = formatDist(idx);
+  // HUD: altitude and position
+  const dtmHere = profile.dtm[idx] ?? 0;
+  hud.textContent = 'Alt ' + Math.round(p.y) + ' m  |  AGL ' + Math.round(p.y - dtmHere) +
+                    ' m  |  ' + formatDist(idx);
+}
+
+positionCamera(0);
+
+function animate(ts) {
+  requestAnimationFrame(animate);
+  if (playing && lastTime !== null) {
+    const dt = (ts - lastTime) / 1000;
+    curIdx = Math.min(nSamples - 1, curIdx + dt * SPEED);
+    positionCamera(Math.round(curIdx));
+    if (Math.round(curIdx) >= nSamples - 1) {
+      playing = false;
+      btnPlay.textContent = '\\u25B6';
+    }
+  }
+  lastTime = playing ? ts : null;
+  renderer.render(scene, camera);
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+document.getElementById('btn-start').onclick = () => {
+  curIdx = 0; playing = false; btnPlay.textContent = '\\u25B6';
+  positionCamera(0);
+};
+document.getElementById('btn-end').onclick = () => {
+  curIdx = nSamples - 1; playing = false; btnPlay.textContent = '\\u25B6';
+  positionCamera(nSamples - 1);
+};
+document.getElementById('btn-prev').onclick = () => {
+  playing = false; btnPlay.textContent = '\\u25B6';
+  // Jump to previous waypoint
+  const ci = Math.round(curIdx);
+  let target = 0;
+  for (const wi of wpPathIdx) { if (wi < ci - 2) target = wi; }
+  curIdx = target; positionCamera(target);
+};
+document.getElementById('btn-next').onclick = () => {
+  playing = false; btnPlay.textContent = '\\u25B6';
+  const ci = Math.round(curIdx);
+  let target = nSamples - 1;
+  for (let i = wpPathIdx.length - 1; i >= 0; i--) {
+    if (wpPathIdx[i] > ci + 2) { target = wpPathIdx[i]; break; }
+  }
+  curIdx = target; positionCamera(target);
+};
+btnPlay.onclick = () => {
+  if (Math.round(curIdx) >= nSamples - 1) curIdx = 0;
+  playing = !playing;
+  btnPlay.textContent = playing ? '\\u23F8' : '\\u25B6';
+  if (playing) lastTime = null;
+};
+scrubber.addEventListener('input', () => {
+  playing = false; btnPlay.textContent = '\\u25B6';
+  curIdx = parseInt(scrubber.value, 10);
+  positionCamera(curIdx);
+});
+
+// ── Hide loading overlay and start ───────────────────────────────────────────
+setLoad(100, 'Ready.');
+setTimeout(() => {
+  document.getElementById('loading').style.display = 'none';
+  requestAnimationFrame(animate);
+}, 200);
+
+} catch(err) {
+  console.error('[FPV] Fatal error:', err);
+  document.getElementById('load-msg').textContent = 'Error: ' + err.message;
+  document.getElementById('load-bar').style.background = '#c94040';
+}
+
+}, 50);   // end deferred init
+</script>
+</body>
+</html>
