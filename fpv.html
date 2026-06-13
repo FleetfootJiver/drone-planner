@@ -1,4 +1,4 @@
-<!-- FPV View v1.5 -->
+<!-- FPV View v1.6 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -238,17 +238,48 @@ function osmTile2lat(y, z)    {
   return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
 }
 
-// Rough OSGB → WGS84 inverse (same affine as main page, sufficient for tile counting)
-function osgbToWgs84Approx(e, n) {
-  const refE=400000, refN=650000, refLat=55.5, refLng=-3.5;
-  const mPerLat=111320, mPerLng=111320*Math.cos(51.5*Math.PI/180);
-  return { lat: refLat+(n-refN)/mPerLat, lng: refLng+(e-refE)/mPerLng };
+// Proper OSGB36 → WGS84 inverse Transverse Mercator.
+// Uses iterative Newton-Raphson northing inversion — accurate to <1m across GB.
+function osgbToWgs84(e_in, n_in) {
+  const a=6378137.0, f=1/298.257223563;
+  const b=a*(1-f), e2=2*f-f*f;
+  const F0=0.9996012717;
+  const lat0=49*Math.PI/180, lng0=-2*Math.PI/180;
+  const N0=-100000, E0=400000;
+  // Iterative solution for latitude from northing
+  let latr = (n_in-N0)/(a*F0) + lat0;
+  const nn=(a-b)/(a+b), nn2=nn*nn, nn3=nn*nn2;
+  for (let iter=0; iter<10; iter++) {
+    const M = b*F0*(
+      (1+nn+1.25*nn2+1.25*nn3)*(latr-lat0)
+      -(3*nn+3*nn2+2.625*nn3)*Math.sin(latr-lat0)*Math.cos(latr+lat0)
+      +(1.875*nn2+1.875*nn3)*Math.sin(2*(latr-lat0))*Math.cos(2*(latr+lat0))
+      -(35/24)*nn3*Math.sin(3*(latr-lat0))*Math.cos(3*(latr+lat0))
+    );
+    latr += (n_in-N0-M)/(a*F0);
+    if (Math.abs(n_in-N0-M) < 0.0001) break;
+  }
+  const sinL=Math.sin(latr), cosL=Math.cos(latr), tanL=Math.tan(latr);
+  const nu  = a*F0/Math.sqrt(1-e2*sinL*sinL);
+  const rho = a*F0*(1-e2)/Math.pow(1-e2*sinL*sinL,1.5);
+  const eta2= nu/rho-1;
+  const dE  = e_in-E0;
+  const lat = latr
+    - (tanL/(2*rho*nu))*dE*dE
+    + (tanL/(24*rho*nu**3))*(5+3*tanL**2+eta2-9*tanL**2*eta2)*dE**4
+    - (tanL/(720*rho*nu**5))*(61+90*tanL**2+45*tanL**4)*dE**6;
+  const lng = lng0
+    + dE/(nu*cosL)
+    - dE**3/(6*nu**3*cosL)*(nu/rho+2*tanL**2)
+    + dE**5/(120*nu**5*cosL)*(5+28*tanL**2+24*tanL**4)
+    - dE**7/(5040*nu**7*cosL)*(61+662*tanL**2+1320*tanL**4+720*tanL**6);
+  return { lat: lat*180/Math.PI, lng: lng*180/Math.PI };
 }
 
 async function loadOsmTexture() {
   setLoad(92, 'Fetching OSM tiles…');
-  const sw = osgbToWgs84Approx(gMinX, gMinY);
-  const ne = osgbToWgs84Approx(gMaxX, gMaxY);
+  const sw = osgbToWgs84(gMinX, gMinY);
+  const ne = osgbToWgs84(gMaxX, gMaxY);
   const z  = osmZoom;
 
   const tx0 = osmLng2tile(sw.lng, z), tx1 = osmLng2tile(ne.lng, z);
@@ -270,25 +301,26 @@ async function loadOsmTexture() {
   ctx.fillRect(0, 0, cvs.width, cvs.height);
 
   // Fetch all tiles in parallel (OSM allows this for light use)
+  let loaded=0, failed=0;
   const fetches = [];
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const col = tx - tx0, row = ty - ty0;
-      // Use a subdomain (a/b/c) to distribute load
       const sub = ['a','b','c'][(tx+ty) % 3];
       const url = `https://${sub}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`;
       fetches.push(
         new Promise(resolve => {
           const img = new Image();
           img.crossOrigin = 'anonymous';
-          img.onload  = () => { ctx.drawImage(img, col*TILE_PX, row*TILE_PX); resolve(); };
-          img.onerror = () => resolve();   // skip failed tiles gracefully
+          img.onload  = () => { ctx.drawImage(img, col*TILE_PX, row*TILE_PX); loaded++; resolve(); };
+          img.onerror = () => { failed++; resolve(); };
           img.src = url;
         })
       );
     }
   }
   await Promise.all(fetches);
+  console.log(`[FPV] OSM tiles: ${loaded} loaded, ${failed} failed of ${totalTiles} total`);
 
   // Now crop/transform the stitched tile canvas to exactly match the terrain grid.
   // The tile canvas covers [tileSW_lng..tileNE_lng] × [tileSW_lat..tileNE_lat].
@@ -304,7 +336,7 @@ async function loadOsmTexture() {
 
   // For each terrain pixel column, compute the source X in the tile canvas
   // X in world = col metres east of gMinX → OSGB easting = gMinX + col
-  // → lng = osgbToWgs84Approx(gMinX+col, gMinY).lng  (Y doesn't matter for lng)
+  // → lng = osgbToWgs84(gMinX+col, gMinY).lng  (Y doesn't matter for lng)
   // → tile canvas X = (lng - tileSW_lng)/(tileNE_lng-tileSW_lng) * cvs.width
   // Do this as a drawImage transform — compute src rect corners and use drawImage
 

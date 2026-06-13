@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.2 -->
+<!-- Drone Route Planner v2.3 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1014,18 +1014,28 @@ function osmTileCount(minLat, minLng, maxLat, maxLng, zoom) {
 // Approximate OSGB bounds → WGS84 for tile count calculation.
 // Uses the Helmert inverse — accurate enough for counting tiles.
 function osgbBoundsToWgs84(bounds_osgb) {
-  // We'll use pyproj-equivalent JS inline (simplified reverse TM)
-  // Good enough: linear scale from a UK reference point
-  // 1° lat ≈ 111320m, 1° lng ≈ 111320*cos(lat) at UK lat ~51°
-  const [minE, minN, maxE, maxN] = bounds_osgb;
-  const refE=400000, refN=650000, refLat=55.5, refLng=-3.5;
-  const mPerLat = 111320;
-  const mPerLng = 111320 * Math.cos(51.5 * Math.PI / 180);
-  const minLat = refLat + (minN - refN) / mPerLat;
-  const maxLat = refLat + (maxN - refN) / mPerLat;
-  const minLng = refLng + (minE - refE) / mPerLng;
-  const maxLng = refLng + (maxE - refE) / mPerLng;
-  return { minLat, minLng, maxLat, maxLng };
+  function inv(e_in, n_in) {
+    const a=6378137.0,f=1/298.257223563,b=a*(1-f),e2=2*f-f*f;
+    const F0=0.9996012717,lat0=49*Math.PI/180,lng0=-2*Math.PI/180,N0=-100000,E0=400000;
+    const nn=(a-b)/(a+b),nn2=nn*nn,nn3=nn*nn2;
+    let latr=(n_in-N0)/(a*F0)+lat0;
+    for(let i=0;i<10;i++){
+      const M=b*F0*((1+nn+1.25*nn2+1.25*nn3)*(latr-lat0)
+        -(3*nn+3*nn2+2.625*nn3)*Math.sin(latr-lat0)*Math.cos(latr+lat0)
+        +(1.875*nn2+1.875*nn3)*Math.sin(2*(latr-lat0))*Math.cos(2*(latr+lat0))
+        -(35/24)*nn3*Math.sin(3*(latr-lat0))*Math.cos(3*(latr+lat0)));
+      const diff=n_in-N0-M; latr+=diff/(a*F0); if(Math.abs(diff)<0.0001)break;
+    }
+    const sinL=Math.sin(latr),cosL=Math.cos(latr),tanL=Math.tan(latr);
+    const nu=a*F0/Math.sqrt(1-e2*sinL*sinL),rho=a*F0*(1-e2)/Math.pow(1-e2*sinL*sinL,1.5);
+    const dE=e_in-E0;
+    const lat=latr-(tanL/(2*rho*nu))*dE**2+(tanL/(24*rho*nu**3))*(5+3*tanL**2+(nu/rho-1)-9*tanL**2*(nu/rho-1))*dE**4;
+    const lng=lng0+dE/(nu*cosL)-dE**3/(6*nu**3*cosL)*(nu/rho+2*tanL**2)+dE**5/(120*nu**5*cosL)*(5+28*tanL**2+24*tanL**4);
+    return { lat:lat*180/Math.PI, lng:lng*180/Math.PI };
+  }
+  const [minE,minN,maxE,maxN] = bounds_osgb;
+  const sw=inv(minE,minN), ne=inv(maxE,maxN);
+  return { minLat:sw.lat, minLng:sw.lng, maxLat:ne.lat, maxLng:ne.lng };
 }
 
 const MAX_OSM_TILES = 64;
