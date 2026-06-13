@@ -1,4 +1,4 @@
-<!-- FPV View v1.4 -->
+<!-- FPV View v1.5 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -219,6 +219,7 @@ const mat  = new THREE.MeshLambertMaterial({
   vertexColors: terrainMode === 'brown',
   side: THREE.FrontSide
 });
+const mesh = new THREE.Mesh(geo, mat);
 scene.add(mesh);
 
 // ── OSM texture loading ──────────────────────────────────────────────────────
