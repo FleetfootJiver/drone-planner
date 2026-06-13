@@ -1,4 +1,4 @@
-<!-- FPV View v1.1 -->
+<!-- FPV View v1.2 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -118,7 +118,7 @@ renderer.shadowMap.enabled = false;
 
 const scene    = new THREE.Scene();
 scene.background = new THREE.Color(0x87CEEB);   // sky blue
-scene.fog        = new THREE.FogExp2(0xC8DFF0, 0.00025);
+scene.fog = new THREE.FogExp2(0xC8DFF0, 0.00008);
 
 // ── Sun lighting ────────────────────────────────────────────────────────────
 // Simple solar position for UK centroid (~54°N) using current date/time.
@@ -291,7 +291,7 @@ setLoad(90, 'Setting up camera…');
 const wpPathIdx = wpDist.map(d => Math.round((d / totalDist) * (nSamples - 1)));
 
 // ── Camera & renderer sizing ─────────────────────────────────────────────────
-const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
+const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 20000);
 
 function resize() {
   const w = canvas.parentElement.clientWidth;
@@ -323,18 +323,21 @@ function formatDist(i) {
 function positionCamera(idx) {
   const p  = path[idx];
   camera.position.set(p.x, p.y, p.z);
-  // Look-ahead: blend current forward direction
-  const ahead = Math.min(idx + 5, nSamples - 1);
+  // Look-ahead: at Rule A altitude (120m AGL) we need to look far ahead
+  // to see a useful forward view rather than pointing at the ground.
+  // Use 200 samples (≈200m) ahead, and aim at terrain level of that point
+  // so the camera looks toward the horizon rather than straight down.
+  const ahead = Math.min(idx + 200, nSamples - 1);
   const q = path[ahead];
+  const dtmAhead = isFinite(profile.dtm[ahead]) ? profile.dtm[ahead] : p.y - 120;
   if (Math.abs(q.x - p.x) > 0.01 || Math.abs(q.z - p.z) > 0.01) {
-    camera.lookAt(q.x, q.y, q.z);
+    camera.lookAt(q.x, dtmAhead, q.z);
   }
   scrubber.value = idx;
   timeLabel.textContent = formatDist(idx);
-  // HUD: altitude and position
-  const dtmHere = profile.dtm[idx] ?? 0;
-  hud.textContent = 'Alt ' + Math.round(p.y) + ' m  |  AGL ' + Math.round(p.y - dtmHere) +
-                    ' m  |  ' + formatDist(idx);
+  const dtmHere = isFinite(profile.dtm[idx]) ? profile.dtm[idx] : 0;
+  hud.textContent = 'Alt ' + Math.round(p.y) + ' m ASL  |  AGL ' +
+                    Math.round(p.y - dtmHere) + ' m  |  ' + formatDist(idx);
 }
 
 positionCamera(0);
