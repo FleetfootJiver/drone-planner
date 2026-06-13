@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.3 -->
+<!-- Drone Route Planner v2.4 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1042,7 +1042,10 @@ const MAX_OSM_TILES = 64;
 
 function updateOsmZoomUI() {
   if (!_terrainGrid) return;
-  const wgs = osgbBoundsToWgs84(_terrainGrid.bounds_osgb);
+  // Use the OSTN15-corrected WGS84 bounds from the backend.
+  const [sw_lng, sw_lat, ne_lng, ne_lat] = _terrainGrid.bounds_wgs84;
+  if (sw_lng === 0 && sw_lat === 0) return;   // not yet available
+  const wgs = { minLat: sw_lat, minLng: sw_lng, maxLat: ne_lat, maxLng: ne_lng };
   let bestValid = 15;
   for (let z = 15; z <= 19; z++) {
     const { total } = osmTileCount(wgs.minLat, wgs.minLng, wgs.maxLat, wgs.maxLng, z);

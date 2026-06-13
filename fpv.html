@@ -1,4 +1,4 @@
-<!-- FPV View v1.6 -->
+<!-- FPV View v1.7 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -278,8 +278,16 @@ function osgbToWgs84(e_in, n_in) {
 
 async function loadOsmTexture() {
   setLoad(92, 'Fetching OSM tiles…');
-  const sw = osgbToWgs84(gMinX, gMinY);
-  const ne = osgbToWgs84(gMaxX, gMaxY);
+
+  // Use the WGS84 bounds supplied by the backend (computed via pyproj OSTN15).
+  // The pure JS inverse TM without the OSTN15 datum shift is ~100m off in GB.
+  const [sw_lng, sw_lat, ne_lng, ne_lat] = grid.bounds_wgs84;
+  if (sw_lng === 0 && sw_lat === 0) {
+    console.warn('[FPV] bounds_wgs84 not available — OSM texture skipped');
+    return;
+  }
+  const sw = { lat: sw_lat, lng: sw_lng };
+  const ne = { lat: ne_lat, lng: ne_lng };
   const z  = osmZoom;
 
   const tx0 = osmLng2tile(sw.lng, z), tx1 = osmLng2tile(ne.lng, z);
