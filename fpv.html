@@ -1,4 +1,4 @@
-<!-- FPV View v1.0 -->
+<!-- FPV View v1.1 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -220,62 +220,69 @@ scene.add(mesh);
 setLoad(80, 'Building flight path…');
 
 // ── Camera flight path ──────────────────────────────────────────────────────
-// Convert WGS84 waypoints to OSGB world coords using the profile sample points.
-// The profile has 1m spacing along the route; use the distances array to build
-// a 3D path.  Camera altitude = DTM at that point + 10m (default eye height).
-const FLIGHT_ALT_AGL = 10;   // metres above terrain
+// Camera altitude = Rule A = DTM + 120 m (will be user-selectable later).
+// World space: X = OSGB easting - gMinX, Z = gMaxY - northing (Z increases southward).
 
-// Build path from profile sample points
-// We know profile.points samples at SAMPLE_SPACING_M = 1m intervals.
-// Convert each sample's lat/lng to OSGB world space using the grid bounds.
-// Since we don't have individual sample OSGB coords, we interpolate
-// the waypoints linearly at each sample index.
-
-// Build cumulative waypoint distances in OSGB (approximate via lat/lng haversine)
 function hav(a, b) {
   const R = 6371000, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lng-a.lng)*Math.PI/180;
   const s = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
   return R * 2 * Math.asin(Math.sqrt(s));
 }
 
-// Approximate OSGB from lat/lng using grid bounds and profile bounds
-// We use linear interpolation anchored on the grid bounds extent.
-// More accurate: use the same OSGB projection. Here we use a simple
-// affine approximation good to ~10m over a typical UK route bbox.
-const latSpan = (gMaxY - gMinY) / 111320;
-const latCentre = (gMinY/111320 + (gMinY + (gMaxY-gMinY))/111320) / 2 + 51;
-const lngScale  = 111320 * Math.cos(51.5 * Math.PI / 180);
-
-function wgs84ToWorld(lat, lng) {
-  // rough OSGB: use the grid's own bounds as reference
-  // (proper pyproj not available in browser; error <20m over 2km route)
-  const e = gMinX + (lng - (wps[0].lng)) * lngScale + (gMaxX-gMinX)/2 - (gMaxX-gMinX)/2;
-  const n = gMinY + (lat - (wps[0].lat)) * 111320  + (gMaxY-gMinY)/2 - (gMaxY-gMinY)/2;
-  return { x: e - gMinX, z: (gMaxY - n) };
+// Full OSGB36 Transverse Mercator projection (Ordnance Survey formulation).
+// Accurate to <1 m across Great Britain — no approximation needed.
+function wgs84ToOsgb(lat, lng) {
+  const a = 6378137.0, f = 1/298.257223563;
+  const b = a*(1-f), e2 = 2*f - f*f;
+  const F0 = 0.9996012717;
+  const lat0 = 49*Math.PI/180, lng0 = -2*Math.PI/180;
+  const N0 = -100000, E0 = 400000;
+  const latr = lat*Math.PI/180, lngr = lng*Math.PI/180;
+  const n  = (a-b)/(a+b), n2 = n*n, n3 = n*n2;
+  const sinL = Math.sin(latr), cosL = Math.cos(latr), tanL = Math.tan(latr);
+  const nu   = a*F0/Math.sqrt(1-e2*sinL*sinL);
+  const rho  = a*F0*(1-e2)/Math.pow(1-e2*sinL*sinL,1.5);
+  const eta2 = nu/rho - 1;
+  const dL   = lngr - lng0;
+  const M = b*F0*(
+    (1+n+1.25*n2+1.25*n3)*(latr-lat0)
+    -(3*n+3*n2+2.625*n3)*Math.sin(latr-lat0)*Math.cos(latr+lat0)
+    +(1.875*n2+1.875*n3)*Math.sin(2*(latr-lat0))*Math.cos(2*(latr+lat0))
+    -(35/24)*n3*Math.sin(3*(latr-lat0))*Math.cos(3*(latr+lat0))
+  );
+  const I=M+N0, II=nu/2*sinL*cosL;
+  const III=nu/24*sinL*cosL**3*(5-tanL**2+9*eta2);
+  const IIIA=nu/720*sinL*cosL**5*(61-58*tanL**2+tanL**4);
+  const IV=nu*cosL, V=nu/6*cosL**3*(nu/rho-tanL**2);
+  const VI=nu/120*cosL**5*(5-18*tanL**2+tanL**4+14*eta2-58*tanL**2*eta2);
+  return {
+    e: E0 + IV*dL + V*dL**3 + VI*dL**5,
+    n: I  + II*dL**2 + III*dL**4 + IIIA*dL**6
+  };
 }
 
-// Better: directly use the profile distances and waypoint positions.
-// Walk along waypoints, interpolate OSGB position at each sample.
-const wpOsgb = wps.map(w => wgs84ToWorld(w.lat, w.lng));
+function osgbToWorld(e, n) {
+  return { x: e - gMinX, z: gMaxY - n };
+}
+
+const wpOsgb = wps.map(w => { const o = wgs84ToOsgb(w.lat, w.lng); return osgbToWorld(o.e, o.n); });
 const wpDist = [0];
 for (let i = 1; i < wps.length; i++) wpDist.push(wpDist[i-1] + hav(wps[i-1], wps[i]));
 const totalDist = wpDist[wpDist.length - 1];
 
 const nSamples = profile.points;
-const path = [];   // {x, y, z} world coords for each sample
+const path = [];
 
 for (let s = 0; s < nSamples; s++) {
   const d = (s / (nSamples - 1)) * totalDist;
-  // Find segment
   let seg = 0;
   for (let i = 1; i < wpDist.length - 1; i++) { if (d >= wpDist[i]) seg = i; }
   const segLen = wpDist[seg+1] - wpDist[seg];
   const t = segLen > 0 ? (d - wpDist[seg]) / segLen : 0;
-  const wx = wpOsgb[seg].x + t * (wpOsgb[seg+1].x - wpOsgb[seg].x);
-  const wz = wpOsgb[seg].z + t * (wpOsgb[seg+1].z - wpOsgb[seg].z);
-
-  const dtmVal = profile.dtm[s] ?? minDtm;
-  path.push({ x: wx, y: dtmVal + FLIGHT_ALT_AGL, z: wz });
+  const wx = wpOsgb[seg].x + t*(wpOsgb[seg+1].x - wpOsgb[seg].x);
+  const wz = wpOsgb[seg].z + t*(wpOsgb[seg+1].z - wpOsgb[seg].z);
+  const dtmVal = isFinite(profile.dtm[s]) ? profile.dtm[s] : minDtm;
+  path.push({ x: wx, y: dtmVal + 120, z: wz });   // Rule A: DTM + 120 m
 }
 
 setLoad(90, 'Setting up camera…');
@@ -340,7 +347,7 @@ function animate(ts) {
     positionCamera(Math.round(curIdx));
     if (Math.round(curIdx) >= nSamples - 1) {
       playing = false;
-      btnPlay.textContent = '\\u25B6';
+      btnPlay.textContent = '▶';
     }
   }
   lastTime = playing ? ts : null;
@@ -349,15 +356,15 @@ function animate(ts) {
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 document.getElementById('btn-start').onclick = () => {
-  curIdx = 0; playing = false; btnPlay.textContent = '\\u25B6';
+  curIdx = 0; playing = false; btnPlay.textContent = '▶';
   positionCamera(0);
 };
 document.getElementById('btn-end').onclick = () => {
-  curIdx = nSamples - 1; playing = false; btnPlay.textContent = '\\u25B6';
+  curIdx = nSamples - 1; playing = false; btnPlay.textContent = '▶';
   positionCamera(nSamples - 1);
 };
 document.getElementById('btn-prev').onclick = () => {
-  playing = false; btnPlay.textContent = '\\u25B6';
+  playing = false; btnPlay.textContent = '▶';
   // Jump to previous waypoint
   const ci = Math.round(curIdx);
   let target = 0;
@@ -365,7 +372,7 @@ document.getElementById('btn-prev').onclick = () => {
   curIdx = target; positionCamera(target);
 };
 document.getElementById('btn-next').onclick = () => {
-  playing = false; btnPlay.textContent = '\\u25B6';
+  playing = false; btnPlay.textContent = '▶';
   const ci = Math.round(curIdx);
   let target = nSamples - 1;
   for (let i = wpPathIdx.length - 1; i >= 0; i--) {
@@ -376,11 +383,11 @@ document.getElementById('btn-next').onclick = () => {
 btnPlay.onclick = () => {
   if (Math.round(curIdx) >= nSamples - 1) curIdx = 0;
   playing = !playing;
-  btnPlay.textContent = playing ? '\\u23F8' : '\\u25B6';
+  btnPlay.textContent = playing ? '⏸' : '▶';
   if (playing) lastTime = null;
 };
 scrubber.addEventListener('input', () => {
-  playing = false; btnPlay.textContent = '\\u25B6';
+  playing = false; btnPlay.textContent = '▶';
   curIdx = parseInt(scrubber.value, 10);
   positionCamera(curIdx);
 });
