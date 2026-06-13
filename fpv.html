@@ -1,4 +1,4 @@
-<!-- FPV View v1.3 -->
+<!-- FPV View v1.4 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -82,6 +82,7 @@ document.getElementById('load-msg').textContent = 'Data OK: ' + grid.width + 'x'
 
 const terrainMode = data.terrainMode || 'brown';
 const osmZoom     = data.osmZoom     || 17;
+const W        = grid.width;
 const H        = grid.height;
 const [gMinX, gMinY, gMaxX, gMaxY] = grid.bounds_osgb;
 const RES      = grid.resolution_m;          // 1.0 m/px
