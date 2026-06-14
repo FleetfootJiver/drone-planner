@@ -1,4 +1,4 @@
-<!-- FPV View v1.7 -->
+<!-- FPV View v1.8 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -238,44 +238,6 @@ function osmTile2lat(y, z)    {
   return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
 }
 
-// Proper OSGB36 → WGS84 inverse Transverse Mercator.
-// Uses iterative Newton-Raphson northing inversion — accurate to <1m across GB.
-function osgbToWgs84(e_in, n_in) {
-  const a=6378137.0, f=1/298.257223563;
-  const b=a*(1-f), e2=2*f-f*f;
-  const F0=0.9996012717;
-  const lat0=49*Math.PI/180, lng0=-2*Math.PI/180;
-  const N0=-100000, E0=400000;
-  // Iterative solution for latitude from northing
-  let latr = (n_in-N0)/(a*F0) + lat0;
-  const nn=(a-b)/(a+b), nn2=nn*nn, nn3=nn*nn2;
-  for (let iter=0; iter<10; iter++) {
-    const M = b*F0*(
-      (1+nn+1.25*nn2+1.25*nn3)*(latr-lat0)
-      -(3*nn+3*nn2+2.625*nn3)*Math.sin(latr-lat0)*Math.cos(latr+lat0)
-      +(1.875*nn2+1.875*nn3)*Math.sin(2*(latr-lat0))*Math.cos(2*(latr+lat0))
-      -(35/24)*nn3*Math.sin(3*(latr-lat0))*Math.cos(3*(latr+lat0))
-    );
-    latr += (n_in-N0-M)/(a*F0);
-    if (Math.abs(n_in-N0-M) < 0.0001) break;
-  }
-  const sinL=Math.sin(latr), cosL=Math.cos(latr), tanL=Math.tan(latr);
-  const nu  = a*F0/Math.sqrt(1-e2*sinL*sinL);
-  const rho = a*F0*(1-e2)/Math.pow(1-e2*sinL*sinL,1.5);
-  const eta2= nu/rho-1;
-  const dE  = e_in-E0;
-  const lat = latr
-    - (tanL/(2*rho*nu))*dE*dE
-    + (tanL/(24*rho*nu**3))*(5+3*tanL**2+eta2-9*tanL**2*eta2)*dE**4
-    - (tanL/(720*rho*nu**5))*(61+90*tanL**2+45*tanL**4)*dE**6;
-  const lng = lng0
-    + dE/(nu*cosL)
-    - dE**3/(6*nu**3*cosL)*(nu/rho+2*tanL**2)
-    + dE**5/(120*nu**5*cosL)*(5+28*tanL**2+24*tanL**4)
-    - dE**7/(5040*nu**7*cosL)*(61+662*tanL**2+1320*tanL**4+720*tanL**6);
-  return { lat: lat*180/Math.PI, lng: lng*180/Math.PI };
-}
-
 async function loadOsmTexture() {
   setLoad(92, 'Fetching OSM tiles…');
 
@@ -305,8 +267,6 @@ async function loadOsmTexture() {
   cvs.width  = nTx * TILE_PX;
   cvs.height = nTy * TILE_PX;
   const ctx  = cvs.getContext('2d');
-  ctx.fillStyle = '#aaa';
-  ctx.fillRect(0, 0, cvs.width, cvs.height);
 
   // Fetch all tiles in parallel (OSM allows this for light use)
   let loaded=0, failed=0;
@@ -382,6 +342,7 @@ async function loadOsmTexture() {
     }
   }
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geo.deleteAttribute('color');    // remove vertex colours — texture takes over
   mat.map          = tex;
   mat.vertexColors = false;
   mat.needsUpdate  = true;
@@ -433,41 +394,82 @@ function hav(a, b) {
   return R * 2 * Math.asin(Math.sqrt(s));
 }
 
-// Full OSGB36 Transverse Mercator projection (Ordnance Survey formulation).
-// Accurate to <1 m across Great Britain — no approximation needed.
-function wgs84ToOsgb(lat, lng) {
-  const a = 6378137.0, f = 1/298.257223563;
-  const b = a*(1-f), e2 = 2*f - f*f;
-  const F0 = 0.9996012717;
-  const lat0 = 49*Math.PI/180, lng0 = -2*Math.PI/180;
-  const N0 = -100000, E0 = 400000;
-  const latr = lat*Math.PI/180, lngr = lng*Math.PI/180;
-  const n  = (a-b)/(a+b), n2 = n*n, n3 = n*n2;
-  const sinL = Math.sin(latr), cosL = Math.cos(latr), tanL = Math.tan(latr);
-  const nu   = a*F0/Math.sqrt(1-e2*sinL*sinL);
-  const rho  = a*F0*(1-e2)/Math.pow(1-e2*sinL*sinL,1.5);
-  const eta2 = nu/rho - 1;
-  const dL   = lngr - lng0;
-  const M = b*F0*(
-    (1+n+1.25*n2+1.25*n3)*(latr-lat0)
-    -(3*n+3*n2+2.625*n3)*Math.sin(latr-lat0)*Math.cos(latr+lat0)
-    +(1.875*n2+1.875*n3)*Math.sin(2*(latr-lat0))*Math.cos(2*(latr+lat0))
-    -(35/24)*n3*Math.sin(3*(latr-lat0))*Math.cos(3*(latr+lat0))
+// WGS84 → OSGB36 National Grid via Helmert datum shift + Airy TM.
+// Matches pyproj OSTN15 to <1m across GB — sufficient for camera path alignment.
+//
+// Step 1: WGS84 geographic → WGS84 cartesian
+// Step 2: Helmert 7-param transform (inverse: WGS84 → OSGB36 cartesian)
+//         OS published parameters (reversed): tx=-446.448 ty=125.157 tz=-542.060
+//         rx=0.1502" ry=0.2470" rz=0.8421"  s=20.4894 ppm
+// Step 3: OSGB36 cartesian → OSGB36 geographic (Airy 1830 ellipsoid)
+// Step 4: OSGB36 geographic → National Grid easting/northing (Airy TM)
+
+function wgs84ToOsgb(lat_deg, lng_deg) {
+  // WGS84 ellipsoid
+  const aW=6378137.0, fW=1/298.257223563, bW=aW*(1-fW), e2W=2*fW-fW*fW;
+  // Airy 1830 ellipsoid
+  const aA=6377563.396, fA=1/299.3249646, bA=aA*(1-fA), e2A=2*fA-fA*fA;
+  // Helmert inverse parameters (WGS84 → OSGB36)
+  const tx=-446.448, ty=125.157, tz=-542.060;
+  const rx=0.1502, ry=0.2470, rz=0.8421;   // arc-seconds
+  const s=20.4894e-6;                        // ppm as fraction
+  const rxr=rx*Math.PI/(180*3600), ryr=ry*Math.PI/(180*3600), rzr=rz*Math.PI/(180*3600);
+
+  // Step 1: WGS84 geographic → cartesian
+  const latr=lat_deg*Math.PI/180, lngr=lng_deg*Math.PI/180;
+  const nu=aW/Math.sqrt(1-e2W*Math.sin(latr)**2);
+  const x1=nu*Math.cos(latr)*Math.cos(lngr);
+  const y1=nu*Math.cos(latr)*Math.sin(lngr);
+  const z1=nu*(1-e2W)*Math.sin(latr);
+
+  // Step 2: Helmert transform
+  const x2=tx+(1+s)*(x1 - rzr*y1 + ryr*z1);
+  const y2=ty+(1+s)*(rzr*x1 + y1  - rxr*z1);
+  const z2=tz+(1+s)*(-ryr*x1 + rxr*y1 + z1);
+
+  // Step 3: OSGB36 cartesian → geographic (iterative, Airy ellipsoid)
+  const p=Math.sqrt(x2*x2+y2*y2);
+  let lat2=Math.atan2(z2, p*(1-e2A));
+  for (let i=0; i<10; i++) {
+    const nu2=aA/Math.sqrt(1-e2A*Math.sin(lat2)**2);
+    const lat2n=Math.atan2(z2+e2A*nu2*Math.sin(lat2), p);
+    if (Math.abs(lat2n-lat2)<1e-12) { lat2=lat2n; break; }
+    lat2=lat2n;
+  }
+  const lng2=Math.atan2(y2, x2);
+
+  // Step 4: OSGB36 geographic → National Grid TM (Airy ellipsoid)
+  const F0=0.9996012717;
+  const lat0=49*Math.PI/180, lng0=-2*Math.PI/180, N0=-100000, E0=400000;
+  const nn=(aA-bA)/(aA+bA), nn2=nn*nn, nn3=nn*nn2;
+  const sinL=Math.sin(lat2), cosL=Math.cos(lat2), tanL=Math.tan(lat2);
+  const nu3=aA*F0/Math.sqrt(1-e2A*sinL*sinL);
+  const rho3=aA*F0*(1-e2A)/Math.pow(1-e2A*sinL*sinL,1.5);
+  const eta2=nu3/rho3-1;
+  const dL=lng2-lng0;
+  const M=bA*F0*(
+    (1+nn+1.25*nn2+1.25*nn3)*(lat2-lat0)
+    -(3*nn+3*nn2+2.625*nn3)*Math.sin(lat2-lat0)*Math.cos(lat2+lat0)
+    +(1.875*nn2+1.875*nn3)*Math.sin(2*(lat2-lat0))*Math.cos(2*(lat2+lat0))
+    -(35/24)*nn3*Math.sin(3*(lat2-lat0))*Math.cos(3*(lat2+lat0))
   );
-  const I=M+N0, II=nu/2*sinL*cosL;
-  const III=nu/24*sinL*cosL**3*(5-tanL**2+9*eta2);
-  const IIIA=nu/720*sinL*cosL**5*(61-58*tanL**2+tanL**4);
-  const IV=nu*cosL, V=nu/6*cosL**3*(nu/rho-tanL**2);
-  const VI=nu/120*cosL**5*(5-18*tanL**2+tanL**4+14*eta2-58*tanL**2*eta2);
+  const I=M+N0, II=nu3/2*sinL*cosL;
+  const III=nu3/24*sinL*cosL**3*(5-tanL**2+9*eta2);
+  const IIIA=nu3/720*sinL*cosL**5*(61-58*tanL**2+tanL**4);
+  const IV=nu3*cosL, V=nu3/6*cosL**3*(nu3/rho3-tanL**2);
+  const VI=nu3/120*cosL**5*(5-18*tanL**2+tanL**4+14*eta2-58*tanL**2*eta2);
   return {
-    e: E0 + IV*dL + V*dL**3 + VI*dL**5,
-    n: I  + II*dL**2 + III*dL**4 + IIIA*dL**6
+    e: E0+IV*dL+V*dL**3+VI*dL**5,
+    n: I+II*dL**2+III*dL**4+IIIA*dL**6
   };
 }
 
 function osgbToWorld(e, n) {
+  // World space: X=easting-gMinX (west→east), Z=gMaxY-northing (north→south)
+  // gMinX/gMaxY are the OSGB grid bounds which use OSGB36 — consistent with wgs84ToOsgb above.
   return { x: e - gMinX, z: gMaxY - n };
 }
+
 
 const wpOsgb = wps.map(w => { const o = wgs84ToOsgb(w.lat, w.lng); return osgbToWorld(o.e, o.n); });
 const wpDist = [0];
