@@ -1,4 +1,4 @@
-<!-- FPV View v1.8 -->
+<!-- FPV View v1.9 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -215,10 +215,11 @@ geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
 geo.setIndex(new THREE.BufferAttribute(indices, 1));
 geo.computeVertexNormals();
 
-const mat  = new THREE.MeshLambertMaterial({
-  vertexColors: terrainMode === 'brown',
-  side: THREE.FrontSide
-});
+// OSM mode: MeshBasicMaterial renders texture colours exactly — no lighting applied.
+// Brown mode: MeshLambertMaterial with vertex colours, shaded by sun/ambient lights.
+const mat = terrainMode === 'osm'
+  ? new THREE.MeshBasicMaterial({ side: THREE.FrontSide })
+  : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
 const mesh = new THREE.Mesh(geo, mat);
 scene.add(mesh);
 
@@ -347,34 +348,47 @@ async function loadOsmTexture() {
   mat.vertexColors = false;
   mat.needsUpdate  = true;
 
-  // DSM overlay: keep green vertex colour on DSM vertices by adding a second
-  // transparent mesh using only the DSM-elevated vertices
-  // (DSM colours are already in the vertex colour buffer; reuse it for an overlay)
+  // DSM overlay: a separate mesh containing only triangles where at least one
+  // vertex has DSM > DTM + threshold.  Non-DSM areas are simply absent from
+  // this mesh so they never darken the OSM texture underneath.
   if (dsmFlat) {
-    const dsmMat = new THREE.MeshLambertMaterial({
-      vertexColors: true, transparent: true, opacity: 0.75,
-      side: THREE.FrontSide
-    });
-    // Build a separate colour buffer: transparent on ground, green on DSM
-    const overlayColors = new Float32Array(nVerts * 3);
-    for (let row = 0; row < H; row++) {
-      for (let col = 0; col < W; col++) {
-        const i = row * W + col;
-        const dtm = isFinite(dtmFlat[i]) ? dtmFlat[i] : minDtm;
-        const dsm = (dsmFlat && isFinite(dsmFlat[i])) ? dsmFlat[i] : dtm;
-        const useDsm = (dsm - dtm) > DSM_THRESHOLD;
-        overlayColors[i*3]   = useDsm ? COL_DSM.r : 0;
-        overlayColors[i*3+1] = useDsm ? COL_DSM.g : 0;
-        overlayColors[i*3+2] = useDsm ? COL_DSM.b : 0;
+    // Per-vertex DSM flag
+    const isDsm = new Uint8Array(nVerts);
+    for (let i = 0; i < nVerts; i++) {
+      const dtm = isFinite(dtmFlat[i]) ? dtmFlat[i] : minDtm;
+      const dsm = isFinite(dsmFlat[i]) ? dsmFlat[i] : dtm;
+      isDsm[i] = (dsm - dtm) > DSM_THRESHOLD ? 1 : 0;
+    }
+    // Build index buffer containing only quads where any vertex is DSM
+    const dsmIndices = [];
+    for (let row = 0; row < H-1; row++) {
+      for (let col = 0; col < W-1; col++) {
+        const a=idx(col,row), b=idx(col+1,row), c=idx(col+1,row+1), d=idx(col,row+1);
+        if (isDsm[a]||isDsm[b]||isDsm[c]||isDsm[d]) {
+          dsmIndices.push(a,b,d, b,c,d);
+        }
       }
     }
-    // Reuse the same geometry with a different material
-    const dsmGeo = geo.clone();
-    dsmGeo.setAttribute('color', new THREE.BufferAttribute(overlayColors, 3));
-    // Raise DSM mesh very slightly to avoid z-fighting
-    const dsmMesh = new THREE.Mesh(dsmGeo, dsmMat);
-    dsmMesh.position.y = 0.05;
-    scene.add(dsmMesh);
+    if (dsmIndices.length > 0) {
+      // Build a colour buffer for the DSM mesh: green on DSM vertices, brown elsewhere.
+      // This is independent of geo's colour attribute (which may have been deleted in OSM mode).
+      const dsmColors = new Float32Array(nVerts * 3);
+      for (let i = 0; i < nVerts; i++) {
+        const c = isDsm[i] ? COL_DSM : COL_GROUND;
+        dsmColors[i*3]=c.r; dsmColors[i*3+1]=c.g; dsmColors[i*3+2]=c.b;
+      }
+      const dsmGeo = new THREE.BufferGeometry();
+      dsmGeo.setAttribute('position', geo.getAttribute('position'));
+      dsmGeo.setAttribute('color',    new THREE.BufferAttribute(dsmColors, 3));
+      dsmGeo.setIndex(dsmIndices);
+      dsmGeo.computeVertexNormals();
+      const dsmMat = terrainMode === 'osm'
+        ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.FrontSide })
+        : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+      const dsmMesh = new THREE.Mesh(dsmGeo, dsmMat);
+      dsmMesh.position.y = 0.05;
+      scene.add(dsmMesh);
+    }
   }
 
   setLoad(100, 'Ready.');
