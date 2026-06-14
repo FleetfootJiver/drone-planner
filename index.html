@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.4 -->
+<!-- Drone Route Planner v2.5 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1110,17 +1110,11 @@ async function fetchTerrainGrid() {
 document.getElementById('btn-fpv').onclick = async () => {
   const btn = document.getElementById('btn-fpv');
 
-  // If the popup is already open and data is current, just focus it
-  if (_fpvPopup && !_fpvPopup.closed && _lastProfile && _terrainGrid) {
-    _fpvPopup.focus();
-    return;
-  }
-
   // Auto-recalculate profile if waypoints have changed since last calculation
   if (!_lastProfile) {
     setStatus('Calculating profile for FPV view…');
     await runProfile();
-    if (!_lastProfile) return;   // runProfile failed or was cancelled
+    if (!_lastProfile) return;
   }
 
   // Fetch terrain grid if not cached
@@ -1140,6 +1134,10 @@ document.getElementById('btn-fpv').onclick = async () => {
 };
 
 function openFpvWindow() {
+  // Compute Rule B ceiling from current profile to pass to FPV
+  const dtm = _lastProfile ? _lastProfile.dtm.map(v => v ?? 0) : [];
+  const dx  = _lastProfile ? _lastProfile.total_length_m / (_lastProfile.points - 1) : 1;
+
   // Store data on window so fpv.html can read it via window.opener._fpvData.
   window._fpvData = {
     grid:        _terrainGrid,
@@ -1147,16 +1145,21 @@ function openFpvWindow() {
     waypoints:   waypoints.map(w => ({ lat: w.lat, lng: w.lng })),
     terrainMode: getFpvTerrainMode(),
     osmZoom:     getFpvOsmZoom(),
+    altMode:     'agla',
+    ruleB:       dtm.length ? ruleBarcCeiling(dtm, dx) : null,
   };
 
-  _fpvPopup = window.open('fpv.html', 'fpv_view',
-    'width=1000,height=700,resizable=yes,scrollbars=no,toolbar=no,menubar=no');
-  if (!_fpvPopup) {
-    alert('Pop-up blocked — please allow pop-ups for this site.');
-    return;
+  if (_fpvPopup && !_fpvPopup.closed) {
+    // Always reload with fresh data — fixes blank screen on route change
+    _fpvPopup.location.href = 'fpv.html';
+    _fpvPopup.focus();
+  } else {
+    _fpvPopup = window.open('fpv.html', 'fpv_view',
+      'width=1000,height=700,resizable=yes,scrollbars=no,toolbar=no,menubar=no');
+    if (!_fpvPopup) {
+      alert('Pop-up blocked — please allow pop-ups for this site.');
+    }
   }
-  // If the named window was already open, reload it with the fresh data
-  _fpvPopup.location.href = 'fpv.html';
 }
 
 // Invalidate cached terrain grid and profile when waypoints change

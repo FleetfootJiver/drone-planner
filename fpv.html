@@ -1,4 +1,4 @@
-<!-- FPV View v1.9 -->
+<!-- FPV View v2.0 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -10,12 +10,6 @@ body { background:#111; color:#eee; font-family:system-ui,sans-serif;
        display:flex; flex-direction:column; height:100vh; overflow:hidden; }
 #canvas-wrap { flex:1; position:relative; overflow:hidden; }
 canvas { display:block; width:100%!important; height:100%!important; }
-#hud {
-  position:absolute; top:8px; left:50%; transform:translateX(-50%);
-  background:rgba(0,0,0,0.55); border-radius:6px;
-  padding:4px 12px; font-size:11px; color:#ccc;
-  pointer-events:none; white-space:nowrap;
-}
 #controls {
   background:#1a1a1a; border-top:1px solid #333;
   padding:6px 12px; display:flex; align-items:center; gap:8px;
@@ -36,6 +30,27 @@ canvas { display:block; width:100%!important; height:100%!important; }
   font-size:11px; color:#888; white-space:nowrap; min-width:70px;
   text-align:right;
 }
+#agl-label {
+  font-size:11px; color:#aaa; white-space:nowrap;
+}
+#fpv-settings-btn {
+  background:#2a2a2a; border:1px solid #444; color:#ddd;
+  border-radius:5px; padding:5px 8px; cursor:pointer;
+  font-size:14px; line-height:1;
+}
+#fpv-settings-btn:hover { background:#3a3a3a; }
+#fpv-settings-panel {
+  display:none; position:absolute; bottom:48px; right:8px;
+  background:#1e1e1e; border:1px solid #444; border-radius:8px;
+  padding:10px 14px; z-index:100; min-width:200px;
+}
+#fpv-settings-panel.open { display:block; }
+.fpv-sg-title { font-size:10px; color:#888; text-transform:uppercase;
+  letter-spacing:0.05em; margin-bottom:8px; }
+.fpv-sg-row { display:flex; align-items:center; gap:8px;
+  font-size:12px; color:#ccc; margin-bottom:6px; }
+.fpv-sg-row input[type=radio] { accent-color:#4a9eff; cursor:pointer; }
+.fpv-sg-row label { cursor:pointer; }
 #loading {
   position:absolute; inset:0; background:#111;
   display:flex; align-items:center; justify-content:center;
@@ -50,11 +65,16 @@ canvas { display:block; width:100%!important; height:100%!important; }
 <body>
 <div id="canvas-wrap">
   <canvas id="c"></canvas>
-  <div id="hud">Initialising…</div>
   <div id="loading">
     <div id='load-msg'>Starting…</div>
     <div id="load-bar-wrap"><div id="load-bar"></div></div>
   </div>
+</div>
+<div id="fpv-settings-panel">
+  <div class="fpv-sg-title">Camera altitude</div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-agla" value="agla" checked><label for="fpv-alt-agla">120 m AGL</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-ruleb" value="ruleb"><label for="fpv-alt-ruleb">Rule B</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-toal" value="toal"><label for="fpv-alt-toal">120 m TOAL</label></div>
 </div>
 <div id="controls">
   <button class="ctl-btn" id="btn-start"  title="Go to start">&#x23EE;</button>
@@ -64,6 +84,8 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <button class="ctl-btn" id="btn-end"    title="Go to end">&#x23ED;</button>
   <input  type="range" id="scrubber" min="0" max="1000" value="0" step="1">
   <span id="time-label">0 m / 0 m</span>
+  <span id="agl-label">— m AGL</span>
+  <button id="fpv-settings-btn" title="FPV settings">&#x2699;&#xFE0F;</button>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onload="document.getElementById('load-msg').textContent='Three.js loaded, building terrain…';" onerror="document.getElementById('load-msg').textContent='ERROR: Three.js failed to load'; document.getElementById('load-bar').style.background='#c94040';"></script>
@@ -382,9 +404,7 @@ async function loadOsmTexture() {
       dsmGeo.setAttribute('color',    new THREE.BufferAttribute(dsmColors, 3));
       dsmGeo.setIndex(dsmIndices);
       dsmGeo.computeVertexNormals();
-      const dsmMat = terrainMode === 'osm'
-        ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.FrontSide })
-        : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+      const dsmMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
       const dsmMesh = new THREE.Mesh(dsmGeo, dsmMat);
       dsmMesh.position.y = 0.05;
       scene.add(dsmMesh);
@@ -490,6 +510,24 @@ const wpDist = [0];
 for (let i = 1; i < wps.length; i++) wpDist.push(wpDist[i-1] + hav(wps[i-1], wps[i]));
 const totalDist = wpDist[wpDist.length - 1];
 
+// ── Camera altitude mode ─────────────────────────────────────────────────────
+// 'agla'  = DTM + 120 m (Rule A)
+// 'ruleb' = Rule B arc ceiling passed from main page
+// 'toal'  = DTM[0] + 120 m (fixed TOAL = first sample)
+const altMode   = data.altMode || 'agla';
+const ruleBData = data.ruleB  || null;   // Float32Array-like from main page, or null
+
+// TOAL altitude = DTM at first sample + 120 m (computed once)
+const toalAlt = (isFinite(profile.dtm[0]) ? profile.dtm[0] : minDtm) + 120;
+
+function cameraAltAt(s) {
+  const dtmVal = isFinite(profile.dtm[s]) ? profile.dtm[s] : minDtm;
+  if (altMode === 'toal')  return toalAlt;
+  if (altMode === 'ruleb' && ruleBData && ruleBData[s] != null)
+    return ruleBData[s];
+  return dtmVal + 120;   // agla (default)
+}
+
 const nSamples = profile.points;
 const path = [];
 
@@ -501,8 +539,7 @@ for (let s = 0; s < nSamples; s++) {
   const t = segLen > 0 ? (d - wpDist[seg]) / segLen : 0;
   const wx = wpOsgb[seg].x + t*(wpOsgb[seg+1].x - wpOsgb[seg].x);
   const wz = wpOsgb[seg].z + t*(wpOsgb[seg+1].z - wpOsgb[seg].z);
-  const dtmVal = isFinite(profile.dtm[s]) ? profile.dtm[s] : minDtm;
-  path.push({ x: wx, y: dtmVal + 120, z: wz });   // Rule A: DTM + 120 m
+  path.push({ x: wx, y: cameraAltAt(s), z: wz });
 }
 
 setLoad(90, 'Setting up camera…');
@@ -531,8 +568,8 @@ const SPEED  = 20;   // samples per second (≈ 20 m/s = 72 km/h)
 
 const scrubber  = document.getElementById('scrubber');
 const timeLabel = document.getElementById('time-label');
+const aglLabel  = document.getElementById('agl-label');
 const btnPlay   = document.getElementById('btn-play');
-const hud       = document.getElementById('hud');
 
 scrubber.max = nSamples - 1;
 
@@ -543,10 +580,6 @@ function formatDist(i) {
 function positionCamera(idx) {
   const p  = path[idx];
   camera.position.set(p.x, p.y, p.z);
-  // Look-ahead: at Rule A altitude (120m AGL) we need to look far ahead
-  // to see a useful forward view rather than pointing at the ground.
-  // Use 200 samples (≈200m) ahead, and aim at terrain level of that point
-  // so the camera looks toward the horizon rather than straight down.
   const ahead = Math.min(idx + 200, nSamples - 1);
   const q = path[ahead];
   const dtmAhead = isFinite(profile.dtm[ahead]) ? profile.dtm[ahead] : p.y - 120;
@@ -556,8 +589,47 @@ function positionCamera(idx) {
   scrubber.value = idx;
   timeLabel.textContent = formatDist(idx);
   const dtmHere = isFinite(profile.dtm[idx]) ? profile.dtm[idx] : 0;
-  hud.textContent = 'Alt ' + Math.round(p.y) + ' m ASL  |  AGL ' +
-                    Math.round(p.y - dtmHere) + ' m  |  ' + formatDist(idx);
+  aglLabel.textContent = Math.round(p.y - dtmHere) + ' m AGL';
+}
+
+// ── FPV settings panel ────────────────────────────────────────────────────────
+const fpvSettingsPanel = document.getElementById('fpv-settings-panel');
+document.getElementById('fpv-settings-btn').onclick = (e) => {
+  e.stopPropagation();
+  fpvSettingsPanel.classList.toggle('open');
+};
+document.addEventListener('click', () => fpvSettingsPanel.classList.remove('open'));
+
+function rebuildPath() {
+  for (let s = 0; s < nSamples; s++) {
+    path[s].y = cameraAltAt(s);
+  }
+  positionCamera(Math.round(curIdx));
+}
+
+document.querySelectorAll('input[name="fpv-alt"]').forEach(r =>
+  r.addEventListener('change', () => {
+    fpvSettingsPanel.classList.remove('open');
+    rebuildPath();
+  })
+);
+
+// Set initial radio to match passed altMode
+const initRadio = document.getElementById('fpv-alt-' + altMode);
+if (initRadio) initRadio.checked = true;
+// Override cameraAltAt to read from live radio selection
+function getAltMode() {
+  const el = document.querySelector('input[name="fpv-alt"]:checked');
+  return el ? el.value : 'agla';
+}
+// Redefine cameraAltAt to use live radio
+function cameraAltAt(s) {
+  const dtmVal = isFinite(profile.dtm[s]) ? profile.dtm[s] : minDtm;
+  const mode = getAltMode();
+  if (mode === 'toal')  return toalAlt;
+  if (mode === 'ruleb' && ruleBData && ruleBData[s] != null)
+    return ruleBData[s];
+  return dtmVal + 120;
 }
 
 positionCamera(0);
