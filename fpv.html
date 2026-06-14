@@ -1,4 +1,4 @@
-<!-- FPV View v2.2 -->
+<!-- FPV View v2.3 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -50,7 +50,14 @@ canvas { display:block; width:100%!important; height:100%!important; }
 .fpv-sg-row { display:flex; align-items:center; gap:8px;
   font-size:12px; color:#ccc; margin-bottom:6px; }
 .fpv-sg-row input[type=radio] { accent-color:#4a9eff; cursor:pointer; }
+.fpv-sg-row input[type=checkbox] { accent-color:#4a9eff; cursor:pointer; }
 .fpv-sg-row label { cursor:pointer; }
+.fpv-sg-divider { border:none; border-top:1px solid #333; margin:8px 0; }
+#crosshair {
+  display:none; position:absolute; pointer-events:none;
+  top:50%; left:50%; transform:translate(-50%,-50%);
+  width:24px; height:24px;
+}
 #loading {
   position:absolute; inset:0; background:#111;
   display:flex; align-items:center; justify-content:center;
@@ -65,6 +72,14 @@ canvas { display:block; width:100%!important; height:100%!important; }
 <body>
 <div id="canvas-wrap">
   <canvas id="c"></canvas>
+  <!-- Crosshair overlay — shown when enabled in settings -->
+  <svg id="crosshair" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <line x1="12" y1="2"  x2="12" y2="9"  stroke="#ffe000" stroke-width="2"/>
+    <line x1="12" y1="15" x2="12" y2="22" stroke="#ffe000" stroke-width="2"/>
+    <line x1="2"  y1="12" x2="9"  y2="12" stroke="#ffe000" stroke-width="2"/>
+    <line x1="15" y1="12" x2="22" y2="12" stroke="#ffe000" stroke-width="2"/>
+    <circle cx="12" cy="12" r="2" fill="none" stroke="#ffe000" stroke-width="1.5"/>
+  </svg>
   <div id="loading">
     <div id='load-msg'>Starting…</div>
     <div id="load-bar-wrap"><div id="load-bar"></div></div>
@@ -75,6 +90,10 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-agla" value="agla" checked><label for="fpv-alt-agla">120 m AGL</label></div>
   <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-ruleb" value="ruleb"><label for="fpv-alt-ruleb">Rule B</label></div>
   <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-toal" value="toal"><label for="fpv-alt-toal">120 m TOAL</label></div>
+  <hr class="fpv-sg-divider">
+  <div class="fpv-sg-title">Display</div>
+  <div class="fpv-sg-row"><input type="checkbox" id="fpv-show-crosshair"><label for="fpv-show-crosshair">Crosshair</label></div>
+  <div class="fpv-sg-row"><input type="checkbox" id="fpv-show-route"><label for="fpv-show-route">Route line</label></div>
 </div>
 <div id="controls">
   <button class="ctl-btn" id="btn-start"  title="Go to start">&#x23EE;</button>
@@ -632,6 +651,38 @@ function cameraAltAt(s) {
 
 // Populate path Y values now that cameraAltAt is fully defined
 rebuildPath();
+
+// ── Crosshair ────────────────────────────────────────────────────────────────
+const crosshairEl = document.getElementById('crosshair');
+document.getElementById('fpv-show-crosshair').addEventListener('change', function() {
+  crosshairEl.style.display = this.checked ? 'block' : 'none';
+});
+
+// ── Route line ───────────────────────────────────────────────────────────────
+// A THREE.Line drawn on the terrain surface (DTM + 0.5m) along the planned route.
+let routeLineMesh = null;
+
+function buildRouteLine() {
+  if (routeLineMesh) { scene.remove(routeLineMesh); routeLineMesh = null; }
+  const pts = [];
+  for (let s = 0; s < nSamples; s++) {
+    const dtmVal = isFinite(profile.dtm[s]) ? profile.dtm[s] : minDtm;
+    pts.push(new THREE.Vector3(path[s].x, dtmVal + 0.5, path[s].z));
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  const mat = new THREE.LineBasicMaterial({ color: 0xffe000, linewidth: 2 });
+  routeLineMesh = new THREE.Line(geo, mat);
+  scene.add(routeLineMesh);
+}
+
+document.getElementById('fpv-show-route').addEventListener('change', function() {
+  if (this.checked) {
+    buildRouteLine();
+  } else if (routeLineMesh) {
+    scene.remove(routeLineMesh);
+    routeLineMesh = null;
+  }
+});
 
 positionCamera(0);
 
