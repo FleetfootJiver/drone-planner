@@ -1,4 +1,4 @@
-<!-- FPV View v2.0 -->
+<!-- FPV View v2.2 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -96,7 +96,7 @@ canvas { display:block; width:100%!important; height:100%!important; }
 // ── Receive data from opener ────────────────────────────────────────────────
 const data     = window.opener && window.opener._fpvData;
 document.getElementById('load-msg').textContent = data ? 'Data received, initialising…' : 'ERROR: No data from opener';
-if (!data) { document.getElementById('hud').textContent = 'No route data — open from main window.'; return; }
+if (!data) { document.getElementById('load-msg').textContent = 'ERROR: No data from opener — open from main window.'; return; }
 const grid     = data.grid;
 const profile  = data.profile;
 const wps      = data.waypoints;
@@ -520,26 +520,24 @@ const ruleBData = data.ruleB  || null;   // Float32Array-like from main page, or
 // TOAL altitude = DTM at first sample + 120 m (computed once)
 const toalAlt = (isFinite(profile.dtm[0]) ? profile.dtm[0] : minDtm) + 120;
 
-function cameraAltAt(s) {
-  const dtmVal = isFinite(profile.dtm[s]) ? profile.dtm[s] : minDtm;
-  if (altMode === 'toal')  return toalAlt;
-  if (altMode === 'ruleb' && ruleBData && ruleBData[s] != null)
-    return ruleBData[s];
-  return dtmVal + 120;   // agla (default)
-}
+// cameraAltAt(s) is defined after the UI settings panel is wired below.
+// Path building uses it via rebuildPath() after init.
 
 const nSamples = profile.points;
+// Pre-compute XZ positions for all samples; Y (altitude) filled by rebuildPath()
+// after the settings panel is wired and cameraAltAt() is defined.
 const path = [];
-
 for (let s = 0; s < nSamples; s++) {
   const d = (s / (nSamples - 1)) * totalDist;
   let seg = 0;
   for (let i = 1; i < wpDist.length - 1; i++) { if (d >= wpDist[i]) seg = i; }
   const segLen = wpDist[seg+1] - wpDist[seg];
   const t = segLen > 0 ? (d - wpDist[seg]) / segLen : 0;
-  const wx = wpOsgb[seg].x + t*(wpOsgb[seg+1].x - wpOsgb[seg].x);
-  const wz = wpOsgb[seg].z + t*(wpOsgb[seg+1].z - wpOsgb[seg].z);
-  path.push({ x: wx, y: cameraAltAt(s), z: wz });
+  path.push({
+    x: wpOsgb[seg].x + t*(wpOsgb[seg+1].x - wpOsgb[seg].x),
+    y: 0,   // filled by rebuildPath() below
+    z: wpOsgb[seg].z + t*(wpOsgb[seg+1].z - wpOsgb[seg].z),
+  });
 }
 
 setLoad(90, 'Setting up camera…');
@@ -631,6 +629,9 @@ function cameraAltAt(s) {
     return ruleBData[s];
   return dtmVal + 120;
 }
+
+// Populate path Y values now that cameraAltAt is fully defined
+rebuildPath();
 
 positionCamera(0);
 
