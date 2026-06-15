@@ -1,4 +1,4 @@
-<!-- FPV View v2.4 -->
+<!-- FPV View v2.5 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -22,10 +22,43 @@ canvas { display:block; width:100%!important; height:100%!important; }
 }
 .ctl-btn:hover  { background:#3a3a3a; }
 .ctl-btn:active { background:#444; }
-#scrubber {
-  flex:1; height:4px; cursor:pointer; accent-color:#4a9eff;
-  min-width:60px;
+/* Scrubber track wrapper — hosts position scrubber + start/end markers */
+#scrubber-wrap {
+  flex:1; position:relative; height:20px; display:flex;
+  align-items:center; min-width:80px;
 }
+#scrubber-wrap input[type=range] {
+  position:absolute; left:0; right:0; width:100%;
+  -webkit-appearance:none; appearance:none;
+  height:4px; background:transparent; pointer-events:none; cursor:pointer;
+}
+#scrubber-wrap input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance:none; appearance:none;
+  pointer-events:all; cursor:pointer;
+  width:14px; height:14px; border-radius:50%;
+}
+#scrubber       { z-index:3; }
+#scrubber::-webkit-slider-thumb       { background:#4a9eff; }
+#range-start    { z-index:2; }
+#range-start::-webkit-slider-thumb   { background:#2ecc40; width:10px; height:10px; }
+#range-end      { z-index:2; }
+#range-end::-webkit-slider-thumb     { background:#ff4136; width:10px; height:10px; }
+/* Track colour — drawn by JS as a gradient on the wrap background */
+#scrubber-track {
+  position:absolute; left:0; right:0; height:4px;
+  background:#333; border-radius:2px; pointer-events:none;
+}
+#btn-record {
+  background:#2a2a2a; border:1px solid #444; color:#ddd;
+  border-radius:5px; padding:5px 10px; cursor:pointer;
+  font-size:14px; line-height:1; transition:background 0.15s, color 0.15s;
+  white-space:nowrap;
+}
+#btn-record:hover { background:#3a3a3a; }
+#btn-record.armed { background:#8b0000; color:#ff6b6b; border-color:#ff4136; }
+#btn-record.recording { background:#c0392b; color:#fff; border-color:#e74c3c; animation:recpulse 1s infinite; }
+@keyframes recpulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+#rec-status { font-size:10px; color:#ff6b6b; white-space:nowrap; display:none; }
 #time-label {
   font-size:11px; color:#888; white-space:nowrap; min-width:70px;
   text-align:right;
@@ -91,6 +124,14 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-ruleb" value="ruleb"><label for="fpv-alt-ruleb">Rule B</label></div>
   <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-toal" value="toal"><label for="fpv-alt-toal">120 m TOAL</label></div>
   <hr class="fpv-sg-divider">
+  <div class="fpv-sg-title">Drone speed</div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-5"  value="5" ><label for="fpv-spd-5" >5 m/s</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-10" value="10"><label for="fpv-spd-10">10 m/s</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-15" value="15"><label for="fpv-spd-15">15 m/s</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-20" value="20" checked><label for="fpv-spd-20">20 m/s (default)</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-30" value="30"><label for="fpv-spd-30">30 m/s</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-50" value="50"><label for="fpv-spd-50">50 m/s</label></div>
+  <hr class="fpv-sg-divider">
   <div class="fpv-sg-title">Display</div>
   <div class="fpv-sg-row"><input type="checkbox" id="fpv-show-crosshair"><label for="fpv-show-crosshair">Crosshair</label></div>
   <div class="fpv-sg-row"><input type="checkbox" id="fpv-show-route"><label for="fpv-show-route">Route line</label></div>
@@ -101,9 +142,16 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <button class="ctl-btn" id="btn-play"   title="Play / Pause">&#x25B6;</button>
   <button class="ctl-btn" id="btn-next"   title="Next waypoint">&#x23E9;</button>
   <button class="ctl-btn" id="btn-end"    title="Go to end">&#x23ED;</button>
-  <input  type="range" id="scrubber" min="0" max="1000" value="0" step="1">
+  <div id="scrubber-wrap">
+    <div id="scrubber-track"></div>
+    <input type="range" id="range-start" min="0" max="1000" value="0"    step="1" title="Recording start">
+    <input type="range" id="range-end"   min="0" max="1000" value="1000" step="1" title="Recording end">
+    <input type="range" id="scrubber"    min="0" max="1000" value="0"    step="1">
+  </div>
   <span id="time-label">0 m / 0 m</span>
   <span id="agl-label">— m AGL</span>
+  <button id="btn-record" title="Arm recording">&#x23FA; Record</button>
+  <span id="rec-status"></span>
   <button id="fpv-settings-btn" title="FPV settings">&#x2699;&#xFE0F;</button>
 </div>
 
@@ -579,17 +627,45 @@ resize();
 window.addEventListener('resize', resize);
 
 // ── Playback state ────────────────────────────────────────────────────────────
-let curIdx   = 0;
 let playing  = false;
 let lastTime = null;
-const SPEED  = 20;   // samples per second (≈ 20 m/s = 72 km/h)
+let SPEED    = 20;   // m/s — updated by speed selector
 
-const scrubber  = document.getElementById('scrubber');
-const timeLabel = document.getElementById('time-label');
-const aglLabel  = document.getElementById('agl-label');
-const btnPlay   = document.getElementById('btn-play');
+const scrubber    = document.getElementById('scrubber');
+const rangeStart  = document.getElementById('range-start');
+const rangeEnd    = document.getElementById('range-end');
+const timeLabel   = document.getElementById('time-label');
+const aglLabel    = document.getElementById('agl-label');
+const btnPlay     = document.getElementById('btn-play');
+const recStatus   = document.getElementById('rec-status');
 
-scrubber.max = nSamples - 1;
+scrubber.max   = nSamples - 1;
+rangeStart.max = nSamples - 1;
+rangeEnd.max   = nSamples - 1;
+rangeEnd.value = nSamples - 1;
+
+function updateTrack() {
+  const w   = 100 / (nSamples - 1);
+  const s   = parseInt(rangeStart.value) * w;
+  const e   = parseInt(rangeEnd.value)   * w;
+  const cur = parseInt(scrubber.value)   * w;
+  document.getElementById('scrubber-track').style.background =
+    `linear-gradient(to right, #333 ${s}%, #2ecc40 ${s}%, #2ecc40 ${e}%, #333 ${e}%)`;
+}
+
+rangeStart.addEventListener('input', () => {
+  if (parseInt(rangeStart.value) > parseInt(rangeEnd.value))
+    rangeStart.value = rangeEnd.value;
+  updateTrack();
+});
+rangeEnd.addEventListener('input', () => {
+  if (parseInt(rangeEnd.value) < parseInt(rangeStart.value))
+    rangeEnd.value = rangeStart.value;
+  updateTrack();
+});
+updateTrack();
+
+let curIdx = 0;
 
 function formatDist(i) {
   return Math.round(profile.distances_m[i]) + ' m / ' + Math.round(totalDist) + ' m';
@@ -605,6 +681,7 @@ function positionCamera(idx) {
     camera.lookAt(q.x, dtmAhead, q.z);
   }
   scrubber.value = idx;
+  updateTrack();
   timeLabel.textContent = formatDist(idx);
   const dtmHere = isFinite(profile.dtm[idx]) ? profile.dtm[idx] : 0;
   aglLabel.textContent = Math.round(p.y - dtmHere) + ' m AGL';
@@ -691,11 +768,13 @@ function animate(ts) {
   requestAnimationFrame(animate);
   if (playing && lastTime !== null) {
     const dt = (ts - lastTime) / 1000;
-    curIdx = Math.min(nSamples - 1, curIdx + dt * SPEED);
+    const endIdx = parseInt(rangeEnd.value);
+    curIdx = Math.min(endIdx, curIdx + dt * SPEED);
     positionCamera(Math.round(curIdx));
-    if (Math.round(curIdx) >= nSamples - 1) {
+    if (Math.round(curIdx) >= endIdx) {
       playing = false;
       btnPlay.textContent = '▶';
+      stopRecording();   // auto-stop recording when playback reaches end
     }
   }
   lastTime = playing ? ts : null;
@@ -704,41 +783,108 @@ function animate(ts) {
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 document.getElementById('btn-start').onclick = () => {
-  curIdx = 0; playing = false; btnPlay.textContent = '▶';
-  positionCamera(0);
+  curIdx = parseInt(rangeStart.value); playing = false; btnPlay.textContent = '▶';
+  positionCamera(curIdx);
 };
 document.getElementById('btn-end').onclick = () => {
-  curIdx = nSamples - 1; playing = false; btnPlay.textContent = '▶';
-  positionCamera(nSamples - 1);
+  curIdx = parseInt(rangeEnd.value); playing = false; btnPlay.textContent = '▶';
+  positionCamera(curIdx);
 };
 document.getElementById('btn-prev').onclick = () => {
   playing = false; btnPlay.textContent = '▶';
-  // Jump to previous waypoint
   const ci = Math.round(curIdx);
-  let target = 0;
+  let target = parseInt(rangeStart.value);
   for (const wi of wpPathIdx) { if (wi < ci - 2) target = wi; }
   curIdx = target; positionCamera(target);
 };
 document.getElementById('btn-next').onclick = () => {
   playing = false; btnPlay.textContent = '▶';
   const ci = Math.round(curIdx);
-  let target = nSamples - 1;
+  const endIdx = parseInt(rangeEnd.value);
+  let target = endIdx;
   for (let i = wpPathIdx.length - 1; i >= 0; i--) {
-    if (wpPathIdx[i] > ci + 2) { target = wpPathIdx[i]; break; }
+    if (wpPathIdx[i] > ci + 2 && wpPathIdx[i] <= endIdx) { target = wpPathIdx[i]; break; }
   }
   curIdx = target; positionCamera(target);
 };
 btnPlay.onclick = () => {
-  if (Math.round(curIdx) >= nSamples - 1) curIdx = 0;
+  if (Math.round(curIdx) >= parseInt(rangeEnd.value)) curIdx = parseInt(rangeStart.value);
   playing = !playing;
   btnPlay.textContent = playing ? '⏸' : '▶';
-  if (playing) lastTime = null;
+  if (playing) { lastTime = null; startRecordingIfArmed(); }
 };
 scrubber.addEventListener('input', () => {
   playing = false; btnPlay.textContent = '▶';
-  curIdx = parseInt(scrubber.value, 10);
+  curIdx = parseInt(scrubber.value);
   positionCamera(curIdx);
 });
+
+// ── Speed selector ────────────────────────────────────────────────────────────
+document.querySelectorAll('input[name="fpv-speed"]').forEach(r =>
+  r.addEventListener('change', function() { SPEED = parseInt(this.value); })
+);
+
+// ── Recording ─────────────────────────────────────────────────────────────────
+let mediaRecorder = null;
+let recChunks     = [];
+let recArmed      = false;
+let recStartTime  = null;
+let recTimer      = null;
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+}
+
+function startRecordingIfArmed() {
+  if (!recArmed || (mediaRecorder && mediaRecorder.state === 'recording')) return;
+  const btnRec = document.getElementById('btn-record');
+  // Use VP9 if supported, fall back to default codec
+  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    ? 'video/webm;codecs=vp9'
+    : 'video/webm';
+  const stream = canvas.captureStream(30);
+  recChunks = [];
+  mediaRecorder = new MediaRecorder(stream, { mimeType });
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    clearInterval(recTimer);
+    btnRec.className = 'armed';
+    btnRec.textContent = '⏺ Record';
+    recStatus.style.display = 'none';
+    if (recChunks.length === 0) return;
+    const blob = new Blob(recChunks, { type: mimeType });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = 'fpv-flight-' + new Date().toISOString().replace(/[:.]/g,'-').slice(0,19) + '.webm';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    recChunks = [];
+  };
+  mediaRecorder.start(1000);   // collect chunks every 1s
+  recStartTime = Date.now();
+  btnRec.className = 'recording';
+  recStatus.style.display = 'inline';
+  recTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - recStartTime) / 1000);
+    recStatus.textContent = `⏺ ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+  }, 1000);
+}
+
+const btnRecord = document.getElementById('btn-record');
+btnRecord.onclick = () => {
+  recArmed = !recArmed;
+  if (recArmed) {
+    btnRecord.className = 'armed';
+    btnRecord.title = 'Recording armed — will start when play begins';
+  } else {
+    stopRecording();
+    btnRecord.className = '';
+    btnRecord.title = 'Arm recording';
+  }
+};
 
 // ── Hide loading overlay and start ───────────────────────────────────────────
 if (terrainMode === 'osm') {
