@@ -1,4 +1,4 @@
-<!-- FPV View v2.5 -->
+<!-- FPV View v2.6 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,19 +30,24 @@ canvas { display:block; width:100%!important; height:100%!important; }
 #scrubber-wrap input[type=range] {
   position:absolute; left:0; right:0; width:100%;
   -webkit-appearance:none; appearance:none;
-  height:4px; background:transparent; pointer-events:none; cursor:pointer;
+  height:4px; background:transparent; cursor:pointer; margin:0;
 }
 #scrubber-wrap input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance:none; appearance:none;
-  pointer-events:all; cursor:pointer;
+  -webkit-appearance:none; appearance:none; cursor:pointer;
   width:14px; height:14px; border-radius:50%;
 }
-#scrubber       { z-index:3; }
-#scrubber::-webkit-slider-thumb       { background:#4a9eff; }
-#range-start    { z-index:2; }
-#range-start::-webkit-slider-thumb   { background:#2ecc40; width:10px; height:10px; }
-#range-end      { z-index:2; }
-#range-end::-webkit-slider-thumb     { background:#ff4136; width:10px; height:10px; }
+#scrubber-wrap input[type=range]::-moz-range-thumb {
+  border:none; cursor:pointer; width:14px; height:14px; border-radius:50%;
+}
+#scrubber    { z-index:3; }
+#scrubber::-webkit-slider-thumb { background:#4a9eff; }
+#scrubber::-moz-range-thumb     { background:#4a9eff; }
+#range-start { z-index:2; }
+#range-start::-webkit-slider-thumb { background:#2ecc40; width:10px; height:10px; }
+#range-start::-moz-range-thumb     { background:#2ecc40; width:10px; height:10px; }
+#range-end   { z-index:2; }
+#range-end::-webkit-slider-thumb   { background:#ff4136; width:10px; height:10px; }
+#range-end::-moz-range-thumb       { background:#ff4136; width:10px; height:10px; }
 /* Track colour — drawn by JS as a gradient on the wrap background */
 #scrubber-track {
   position:absolute; left:0; right:0; height:4px;
@@ -131,6 +136,12 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-20" value="20" checked><label for="fpv-spd-20">20 m/s (default)</label></div>
   <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-30" value="30"><label for="fpv-spd-30">30 m/s</label></div>
   <div class="fpv-sg-row"><input type="radio" name="fpv-speed" id="fpv-spd-50" value="50"><label for="fpv-spd-50">50 m/s</label></div>
+  <hr class="fpv-sg-divider">
+  <div class="fpv-sg-title">Recording quality</div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-quality" id="fpv-q-low"  value="2000000" ><label for="fpv-q-low" >Low  — 2 Mbps (small file)</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-quality" id="fpv-q-med"  value="8000000" checked><label for="fpv-q-med" >Medium — 8 Mbps (default)</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-quality" id="fpv-q-high" value="20000000"><label for="fpv-q-high">High  — 20 Mbps (large file)</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-quality" id="fpv-q-max"  value="50000000"><label for="fpv-q-max" >Max   — 50 Mbps (lossless-like)</label></div>
   <hr class="fpv-sg-divider">
   <div class="fpv-sg-title">Display</div>
   <div class="fpv-sg-row"><input type="checkbox" id="fpv-show-crosshair"><label for="fpv-show-crosshair">Crosshair</label></div>
@@ -841,12 +852,14 @@ function startRecordingIfArmed() {
   if (!recArmed || (mediaRecorder && mediaRecorder.state === 'recording')) return;
   const btnRec = document.getElementById('btn-record');
   // Use VP9 if supported, fall back to default codec
-  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+  const qualityEl = document.querySelector('input[name="fpv-quality"]:checked');
+  const bitrate   = qualityEl ? parseInt(qualityEl.value) : 8000000;
+  const mimeType  = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
     ? 'video/webm;codecs=vp9'
     : 'video/webm';
   const stream = canvas.captureStream(30);
   recChunks = [];
-  mediaRecorder = new MediaRecorder(stream, { mimeType });
+  mediaRecorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recChunks.push(e.data); };
   mediaRecorder.onstop = () => {
     clearInterval(recTimer);

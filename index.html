@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.5 -->
+<!-- Drone Route Planner v2.6 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1149,16 +1149,18 @@ function openFpvWindow() {
     ruleB:       dtm.length ? ruleBarcCeiling(dtm, dx) : null,
   };
 
+  // Always close any existing popup first — reusing via location.href change
+  // can leave the popup with a broken/stale window.opener reference, causing
+  // the blue screen bug when switching between distant routes.
   if (_fpvPopup && !_fpvPopup.closed) {
-    // Always reload with fresh data — fixes blank screen on route change
-    _fpvPopup.location.href = 'fpv.html';
-    _fpvPopup.focus();
-  } else {
-    _fpvPopup = window.open('fpv.html', 'fpv_view',
-      'width=1000,height=700,resizable=yes,scrollbars=no,toolbar=no,menubar=no');
-    if (!_fpvPopup) {
-      alert('Pop-up blocked — please allow pop-ups for this site.');
-    }
+    _fpvPopup.close();
+    _fpvPopup = null;
+  }
+
+  _fpvPopup = window.open('fpv.html', 'fpv_view',
+    'width=1000,height=700,resizable=yes,scrollbars=no,toolbar=no,menubar=no');
+  if (!_fpvPopup) {
+    alert('Pop-up blocked — please allow pop-ups for this site.');
   }
 }
 
