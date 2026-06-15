@@ -1,4 +1,4 @@
-<!-- FPV View v2.3 -->
+<!-- FPV View v2.4 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -452,8 +452,9 @@ function hav(a, b) {
 //
 // Step 1: WGS84 geographic → WGS84 cartesian
 // Step 2: Helmert 7-param transform (inverse: WGS84 → OSGB36 cartesian)
-//         OS published parameters (reversed): tx=-446.448 ty=125.157 tz=-542.060
-//         rx=0.1502" ry=0.2470" rz=0.8421"  s=20.4894 ppm
+//         OS Tech Note 02 inverse: tx=-446.448 ty=+125.157 tz=-542.060
+//         rx=-0.1502" ry=-0.2470" rz=-0.8421"  s=+20.4894 ppm
+//         (position vector convention: all 7 params negated from forward values)
 // Step 3: OSGB36 cartesian → OSGB36 geographic (Airy 1830 ellipsoid)
 // Step 4: OSGB36 geographic → National Grid easting/northing (Airy TM)
 
@@ -462,10 +463,10 @@ function wgs84ToOsgb(lat_deg, lng_deg) {
   const aW=6378137.0, fW=1/298.257223563, bW=aW*(1-fW), e2W=2*fW-fW*fW;
   // Airy 1830 ellipsoid
   const aA=6377563.396, fA=1/299.3249646, bA=aA*(1-fA), e2A=2*fA-fA*fA;
-  // Helmert inverse parameters (WGS84 → OSGB36)
+  // Helmert inverse parameters (WGS84 → OSGB36), position vector convention
   const tx=-446.448, ty=125.157, tz=-542.060;
-  const rx=0.1502, ry=0.2470, rz=0.8421;   // arc-seconds
-  const s=20.4894e-6;                        // ppm as fraction
+  const rx=-0.1502, ry=-0.2470, rz=-0.8421;   // arc-seconds (all negated)
+  const s=20.4894e-6;                           // scale factor
   const rxr=rx*Math.PI/(180*3600), ryr=ry*Math.PI/(180*3600), rzr=rz*Math.PI/(180*3600);
 
   // Step 1: WGS84 geographic → cartesian
