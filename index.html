@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.6 -->
+<!-- Drone Route Planner v2.7 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -619,6 +619,7 @@ document.getElementById('load-input').onchange = function() {
     } catch(err) { setStatus('Error reading file: ' + err.message); return; }
     if (!loaded.length) { setStatus('No valid waypoints found in file.'); return; }
     waypoints = loaded.map(p => L.latLng(p.lat, p.lng));
+    invalidateTerrainGrid();
     updateRoute();
     if (markers.length > 0) map.fitBounds(L.featureGroup(markers).getBounds(), { padding: [40,40] });
     setStatus('Loaded ' + waypoints.length + ' waypoints from ' + file.name + '. Fetching profile...');
@@ -836,6 +837,20 @@ async function runProfile() {
   const yMax = Math.ceil(Math.max(...allVals)/10)*10 + 20;
 
   _lastProfile = profile;
+
+  // Invalidate terrain grid if it no longer adequately covers the new route.
+  // This catches route changes (drag, load) that didn't trigger invalidation,
+  // e.g. when the cached DEFRA data was reused server-side.
+  if (_terrainGrid) {
+    const [sw_lng, sw_lat, ne_lng, ne_lat] = _terrainGrid.bounds_wgs84 || [0,0,0,0];
+    const lats = waypoints.map(w => w.lat), lngs = waypoints.map(w => w.lng);
+    const margin = 0.001; // ~100m in degrees
+    if (Math.min(...lats) < sw_lat + margin || Math.max(...lats) > ne_lat - margin ||
+        Math.min(...lngs) < sw_lng + margin || Math.max(...lngs) > ne_lng - margin) {
+      console.log('Terrain grid no longer covers route — invalidating');
+      _terrainGrid = null;
+    }
+  }
   if (profileChart) profileChart.destroy();
   profileChart = new Chart(document.getElementById('profile-chart').getContext('2d'), {
     type: 'line',
@@ -1065,15 +1080,7 @@ function updateOsmZoomUI() {
   }
 }
 
-// Update zoom UI whenever the terrain grid is fetched
-const _origFetchTerrainGrid = fetchTerrainGrid;
-async function fetchTerrainGrid() {
-  const result = await _origFetchTerrainGrid();
-  if (result) setTimeout(updateOsmZoomUI, 0);
-  return result;
-}
-
-// Also update when settings panel opens (grid may already be loaded)
+// Also update zoom UI when settings panel opens
 document.getElementById('btn-settings').addEventListener('click', () => {
   if (_terrainGrid) updateOsmZoomUI();
 });
@@ -1104,7 +1111,9 @@ async function fetchTerrainGrid() {
     body: JSON.stringify({ waypoints: waypoints.map(w => ({ lat: w.lat, lng: w.lng })) })
   });
   if (!resp.ok) throw new Error('terrain_grid: ' + resp.status);
-  return await resp.json();
+  const result = await resp.json();
+  setTimeout(updateOsmZoomUI, 0);
+  return result;
 }
 
 document.getElementById('btn-fpv').onclick = async () => {
