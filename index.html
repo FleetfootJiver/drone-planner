@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.7 -->
+<!-- Drone Route Planner v2.8 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -645,8 +645,8 @@ function hideModal() {
 // When WCS backend is added, replace fetchElevations() with a WCS call and
 // populate cachedBbox. The needsNewDownload() check below is already wired in.
 let cachedBbox = null;
-const WCS_BUFFER_M = 500;       // metres added each side when downloading
-const WCS_EDGE_MARGIN_M = 150;  // re-download if waypoint within this of edge
+const WCS_BUFFER_M = 200;       // metres added each side when downloading
+const WCS_EDGE_MARGIN_M = 125;  // re-download if waypoint within this of edge
 
 // Convert metres offset to approximate degrees (good enough at UK latitudes)
 function mToDegreesLat(m) { return m / 111320; }
@@ -1053,7 +1053,7 @@ function osgbBoundsToWgs84(bounds_osgb) {
   return { minLat:sw.lat, minLng:sw.lng, maxLat:ne.lat, maxLng:ne.lng };
 }
 
-const MAX_OSM_TILES = 64;
+const MAX_OSM_TILES = 300;
 
 function updateOsmZoomUI() {
   if (!_terrainGrid) return;
