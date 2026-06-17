@@ -1,4 +1,4 @@
-<!-- FPV View v2.6 -->
+<!-- FPV View v2.7 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -318,7 +318,7 @@ geo.computeVertexNormals();
 // OSM mode: MeshBasicMaterial renders texture colours exactly — no lighting applied.
 // Brown mode: MeshLambertMaterial with vertex colours, shaded by sun/ambient lights.
 const mat = terrainMode === 'osm'
-  ? new THREE.MeshBasicMaterial({ side: THREE.FrontSide })
+  ? new THREE.MeshBasicMaterial({ side: THREE.FrontSide, transparent: false, depthWrite: true })
   : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
 const mesh = new THREE.Mesh(geo, mat);
 scene.add(mesh);
@@ -368,6 +368,9 @@ async function loadOsmTexture() {
   cvs.width  = nTx * TILE_PX;
   cvs.height = nTy * TILE_PX;
   const ctx  = cvs.getContext('2d');
+  // Fill white so failed/missing tiles show as white rather than transparent
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, cvs.width, cvs.height);
 
   // Fetch all tiles in parallel (OSM allows this for light use)
   let loaded=0, failed=0;
@@ -402,6 +405,9 @@ async function loadOsmTexture() {
   texCvs.width  = W;
   texCvs.height = H;
   const texCtx  = texCvs.getContext('2d');
+  // White background ensures no transparent gaps if crop misses any pixels
+  texCtx.fillStyle = '#ffffff';
+  texCtx.fillRect(0, 0, W, H);
 
   // For each terrain pixel column, compute the source X in the tile canvas
   // X in world = col metres east of gMinX → OSGB easting = gMinX + col
