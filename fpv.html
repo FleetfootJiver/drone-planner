@@ -1,4 +1,4 @@
-<!-- FPV View v2.7 -->
+<!-- FPV View v2.8 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -372,27 +372,74 @@ async function loadOsmTexture() {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cvs.width, cvs.height);
 
-  // Fetch all tiles in parallel (OSM allows this for light use)
-  let loaded=0, failed=0;
+  // Fetch all tiles in parallel, with one retry on failure (OSM allows this for light use)
+  let loaded=0, failed=0, retried=0;
+  function loadTile(url, col, row) {
+    return new Promise(resolve => {
+      function attempt(isRetry) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        let settled = false;
+        const timeoutId = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          if (!isRetry) {
+            retried++;
+            console.warn(`[FPV] OSM tile timeout, retrying: ${url}`);
+            attempt(true);
+          } else {
+            failed++;
+            console.warn(`[FPV] OSM tile timeout (after retry): ${url}`);
+            resolve();
+          }
+        }, 8000);
+        img.onload = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          ctx.drawImage(img, col*TILE_PX, row*TILE_PX);
+          loaded++;
+          resolve();
+        };
+        img.onerror = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          if (!isRetry) {
+            retried++;
+            console.warn(`[FPV] OSM tile retry: ${url}`);
+            attempt(true);
+          } else {
+            failed++;
+            console.warn(`[FPV] OSM tile failed (after retry): ${url}`);
+            resolve();
+          }
+        };
+        img.src = url;
+      }
+      attempt(false);
+    });
+  }
+  console.log(`[FPV] Fetching ${totalTiles} OSM tiles at zoom ${z} ` +
+              `(tx ${tx0}-${tx1}, ty ${ty0}-${ty1})`);
   const fetches = [];
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const col = tx - tx0, row = ty - ty0;
       const sub = ['a','b','c'][(tx+ty) % 3];
       const url = `https://${sub}.tile.openstreetmap.org/${z}/${tx}/${ty}.png`;
-      fetches.push(
-        new Promise(resolve => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload  = () => { ctx.drawImage(img, col*TILE_PX, row*TILE_PX); loaded++; resolve(); };
-          img.onerror = () => { failed++; resolve(); };
-          img.src = url;
-        })
-      );
+      fetches.push(loadTile(url, col, row));
     }
   }
-  await Promise.all(fetches);
-  console.log(`[FPV] OSM tiles: ${loaded} loaded, ${failed} failed of ${totalTiles} total`);
+  // Overall safety net: don't let the whole texture load hang forever even if
+  // an individual tile's timeout/retry logic somehow fails to resolve.
+  const allTilesPromise = Promise.all(fetches);
+  const overallTimeout = new Promise(resolve =>
+    setTimeout(() => { console.warn('[FPV] OSM overall timeout hit — proceeding anyway'); resolve(); }, 30000)
+  );
+  await Promise.race([allTilesPromise, overallTimeout]);
+  console.log(`[FPV] OSM tiles: ${loaded} loaded, ${failed} failed, ` +
+              `${retried} retried, of ${totalTiles} total`);
 
   // Now crop/transform the stitched tile canvas to exactly match the terrain grid.
   // The tile canvas covers [tileSW_lng..tileNE_lng] × [tileSW_lat..tileNE_lat].
