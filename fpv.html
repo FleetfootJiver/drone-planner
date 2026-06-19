@@ -1,4 +1,4 @@
-<!-- FPV View v2.8 -->
+<!-- FPV View v2.9 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -296,32 +296,77 @@ for (let row = 0; row < H; row++) {
 
 setLoad(60, 'Building index…');
 
-// Index buffer: two triangles per quad
-const nQuads   = segs_x * segs_z;
-const indices  = new Uint32Array(nQuads * 6);
-let   ii       = 0;
-for (let row = 0; row < segs_z; row++) {
-  for (let col = 0; col < segs_x; col++) {
-    const a = idx(col,   row),   b = idx(col+1, row);
-    const c = idx(col+1, row+1), d = idx(col,   row+1);
-    indices[ii++]=a; indices[ii++]=b; indices[ii++]=d;
-    indices[ii++]=b; indices[ii++]=c; indices[ii++]=d;
-  }
-}
+// WebGL limits the number of indices per draw call (Firefox: 30,000,000).
+// A full single-mesh terrain can exceed this for large grids, causing the
+// draw call to silently fail (blue screen, no error beyond a console warning).
+// Split the terrain into horizontal row-band chunks, each well under the limit.
+const MAX_INDICES_PER_CHUNK = 18_000_000;   // safety margin below the 30M limit
+const quadsPerChunk = Math.floor(MAX_INDICES_PER_CHUNK / 6);
+const rowsPerChunk  = Math.max(1, Math.floor(quadsPerChunk / segs_x));
+const nChunks = Math.ceil(segs_z / rowsPerChunk);
 
-const geo = new THREE.BufferGeometry();
-geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
-geo.setIndex(new THREE.BufferAttribute(indices, 1));
-geo.computeVertexNormals();
+console.log(`[FPV] Terrain ${W}x${H} (${segs_x*segs_z} quads) split into ` +
+            `${nChunks} chunk(s) of ~${rowsPerChunk} rows each`);
+
+const terrainMeshes = [];
+for (let chunk = 0; chunk < nChunks; chunk++) {
+  const rowStart = chunk * rowsPerChunk;
+  const rowEnd   = Math.min(segs_z, rowStart + rowsPerChunk);   // exclusive, in quad-rows
+  // Vertex rows needed: rowStart .. rowEnd (inclusive) since each quad row
+  // touches vertex rows row and row+1
+  const vRowStart = rowStart;
+  const vRowEnd   = rowEnd;   // inclusive vertex row
+  const chunkH    = vRowEnd - vRowStart + 1;
+
+  // Slice out this chunk's vertex data
+  const chunkVerts = chunkH * W;
+  const cPositions = new Float32Array(chunkVerts * 3);
+  const cColors    = new Float32Array(chunkVerts * 3);
+  for (let r = 0; r < chunkH; r++) {
+    const srcRow = vRowStart + r;
+    const srcOff = srcRow * W * 3;
+    const dstOff = r * W * 3;
+    cPositions.set(positions.subarray(srcOff, srcOff + W*3), dstOff);
+    cColors.set(colors.subarray(srcOff, srcOff + W*3), dstOff);
+  }
+
+  // Build local index buffer for this chunk (row-relative)
+  const cQuadRows = rowEnd - rowStart;
+  const cIndices  = new Uint32Array(cQuadRows * segs_x * 6);
+  let cii = 0;
+  function cidx(col, row) { return row * W + col; }   // row is chunk-local (0..chunkH-1)
+  for (let row = 0; row < cQuadRows; row++) {
+    for (let col = 0; col < segs_x; col++) {
+      const a = cidx(col,   row),   b = cidx(col+1, row);
+      const c = cidx(col+1, row+1), d = cidx(col,   row+1);
+      cIndices[cii++]=a; cIndices[cii++]=b; cIndices[cii++]=d;
+      cIndices[cii++]=b; cIndices[cii++]=c; cIndices[cii++]=d;
+    }
+  }
+
+  const cGeo = new THREE.BufferGeometry();
+  cGeo.setAttribute('position', new THREE.BufferAttribute(cPositions, 3));
+  cGeo.setAttribute('color',    new THREE.BufferAttribute(cColors,    3));
+  cGeo.setIndex(new THREE.BufferAttribute(cIndices, 1));
+  cGeo.computeVertexNormals();
+  cGeo.userData = { vRowStart, chunkH };   // remember for UV assignment later
+  terrainMeshes.push(cGeo);
+}
 
 // OSM mode: MeshBasicMaterial renders texture colours exactly — no lighting applied.
 // Brown mode: MeshLambertMaterial with vertex colours, shaded by sun/ambient lights.
 const mat = terrainMode === 'osm'
   ? new THREE.MeshBasicMaterial({ side: THREE.FrontSide, transparent: false, depthWrite: true })
   : new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
-const mesh = new THREE.Mesh(geo, mat);
-scene.add(mesh);
+
+const meshGroup = new THREE.Group();
+for (const cGeo of terrainMeshes) {
+  const m = new THREE.Mesh(cGeo, mat);
+  meshGroup.add(m);
+}
+scene.add(meshGroup);
+// 'mesh' kept as an alias to the group for any code that refers to the whole terrain
+const mesh = meshGroup;
 
 // ── OSM texture loading ──────────────────────────────────────────────────────
 // Only runs when terrainMode === 'osm'.
@@ -483,62 +528,84 @@ async function loadOsmTexture() {
   );
   texCtx.restore();
 
-  // Apply as texture to terrain mesh
+  // Apply as texture to terrain mesh chunks
   const tex = new THREE.CanvasTexture(texCvs);
   tex.flipY = false;    // our canvas is already Y-flipped correctly
-  // Build UV coordinates: each vertex maps linearly to (col/W, row/H)
-  const uvs = new Float32Array(nVerts * 2);
-  for (let row = 0; row < H; row++) {
-    for (let col = 0; col < W; col++) {
-      const i = row * W + col;
-      uvs[i*2]   = col / (W-1);
-      uvs[i*2+1] = row / (H-1);
-    }
-  }
-  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geo.deleteAttribute('color');    // remove vertex colours — texture takes over
   mat.map          = tex;
   mat.vertexColors = false;
   mat.needsUpdate  = true;
 
-  // DSM overlay: a separate mesh containing only triangles where at least one
-  // vertex has DSM > DTM + threshold.  Non-DSM areas are simply absent from
-  // this mesh so they never darken the OSM texture underneath.
+  // Build UV per chunk: each chunk's vertex rows map to the same global
+  // (col/W, row/H) UV space since the texture covers the full grid.
+  for (const cGeo of terrainMeshes) {
+    const { vRowStart, chunkH } = cGeo.userData;
+    const cUvs = new Float32Array(chunkH * W * 2);
+    for (let r = 0; r < chunkH; r++) {
+      const globalRow = vRowStart + r;
+      for (let col = 0; col < W; col++) {
+        const i = r * W + col;
+        cUvs[i*2]   = col / (W-1);
+        cUvs[i*2+1] = globalRow / (H-1);
+      }
+    }
+    cGeo.setAttribute('uv', new THREE.BufferAttribute(cUvs, 2));
+    cGeo.deleteAttribute('color');   // texture takes over from vertex colours
+  }
+
+  // DSM overlay: separate chunked mesh group containing only triangles where
+  // at least one vertex has DSM > DTM + threshold.  Non-DSM areas are simply
+  // absent from this mesh so they never darken the OSM texture underneath.
   if (dsmFlat) {
-    // Per-vertex DSM flag
     const isDsm = new Uint8Array(nVerts);
     for (let i = 0; i < nVerts; i++) {
       const dtm = isFinite(dtmFlat[i]) ? dtmFlat[i] : minDtm;
       const dsm = isFinite(dsmFlat[i]) ? dsmFlat[i] : dtm;
       isDsm[i] = (dsm - dtm) > DSM_THRESHOLD ? 1 : 0;
     }
-    // Build index buffer containing only quads where any vertex is DSM
-    const dsmIndices = [];
-    for (let row = 0; row < H-1; row++) {
-      for (let col = 0; col < W-1; col++) {
-        const a=idx(col,row), b=idx(col+1,row), c=idx(col+1,row+1), d=idx(col,row+1);
-        if (isDsm[a]||isDsm[b]||isDsm[c]||isDsm[d]) {
-          dsmIndices.push(a,b,d, b,c,d);
+    const dsmMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+    const dsmGroup = new THREE.Group();
+    let anyDsmGeo = false;
+
+    for (const cGeo of terrainMeshes) {
+      const { vRowStart, chunkH } = cGeo.userData;
+      const cQuadRows = chunkH - 1;
+      const dIndices = [];
+      function gidx(col, row) { return row * W + col; }   // global index into isDsm/positions/colors
+      function lidx(col, row) { return row * W + col; }   // chunk-local index into cPosBuf
+      for (let r = 0; r < cQuadRows; r++) {
+        const gRow = vRowStart + r;
+        for (let col = 0; col < W-1; col++) {
+          const ga=gidx(col,gRow), gb=gidx(col+1,gRow), gc=gidx(col+1,gRow+1), gd=gidx(col,gRow+1);
+          if (isDsm[ga]||isDsm[gb]||isDsm[gc]||isDsm[gd]) {
+            const la=lidx(col,r), lb=lidx(col+1,r), lc=lidx(col+1,r+1), ld=lidx(col,r+1);
+            dIndices.push(la,lb,ld, lb,lc,ld);
+          }
         }
       }
-    }
-    if (dsmIndices.length > 0) {
-      // Build a colour buffer for the DSM mesh: green on DSM vertices, brown elsewhere.
-      // This is independent of geo's colour attribute (which may have been deleted in OSM mode).
-      const dsmColors = new Float32Array(nVerts * 3);
-      for (let i = 0; i < nVerts; i++) {
-        const c = isDsm[i] ? COL_DSM : COL_GROUND;
-        dsmColors[i*3]=c.r; dsmColors[i*3+1]=c.g; dsmColors[i*3+2]=c.b;
+      if (dIndices.length === 0) continue;
+      anyDsmGeo = true;
+
+      // Build chunk-local colour buffer (green on DSM, brown elsewhere)
+      const cColorsD = new Float32Array(chunkH * W * 3);
+      for (let r = 0; r < chunkH; r++) {
+        const gRow = vRowStart + r;
+        for (let col = 0; col < W; col++) {
+          const gi = gRow * W + col;
+          const li = r * W + col;
+          const c = isDsm[gi] ? COL_DSM : COL_GROUND;
+          cColorsD[li*3]=c.r; cColorsD[li*3+1]=c.g; cColorsD[li*3+2]=c.b;
+        }
       }
-      const dsmGeo = new THREE.BufferGeometry();
-      dsmGeo.setAttribute('position', geo.getAttribute('position'));
-      dsmGeo.setAttribute('color',    new THREE.BufferAttribute(dsmColors, 3));
-      dsmGeo.setIndex(dsmIndices);
-      dsmGeo.computeVertexNormals();
-      const dsmMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
-      const dsmMesh = new THREE.Mesh(dsmGeo, dsmMat);
-      dsmMesh.position.y = 0.05;
-      scene.add(dsmMesh);
+      const dGeo = new THREE.BufferGeometry();
+      dGeo.setAttribute('position', cGeo.getAttribute('position'));
+      dGeo.setAttribute('color',    new THREE.BufferAttribute(cColorsD, 3));
+      dGeo.setIndex(dIndices);
+      dGeo.computeVertexNormals();
+      dsmGroup.add(new THREE.Mesh(dGeo, dsmMat));
+    }
+    if (anyDsmGeo) {
+      dsmGroup.position.y = 0.05;
+      scene.add(dsmGroup);
     }
   }
 
