@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.7 -->
+<!-- Drone Route Planner v2.11 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -178,9 +178,9 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
     <div id="legend">
       <div class="leg-item"><div class="leg-line" style="background:#7c5c2e"></div>DTM (bare earth)</div>
       <div class="leg-item"><div class="leg-line" style="background:#2a7a3b"></div>DSM (surface)</div>
-      <div class="leg-item"><div class="leg-line dashed" style="color:#c94040"></div>Rule A (DTM+120m)</div>
-      <div class="leg-item"><div class="leg-line dashed" style="color:#1a6fa8"></div>Rule B arc (nearest surface within 120m)</div>
-      <div class="leg-item"><div class="leg-line dashed" style="color:#222"></div>Rule C (120m above TOAL)</div>
+      <div class="leg-item" id="leg-ruleA"><div class="leg-line dashed" style="color:#c94040"></div>Rule A (DTM+120m)</div>
+      <div class="leg-item" id="leg-ruleBarc"><div class="leg-line dashed" style="color:#1a6fa8"></div>Rule B arc (nearest surface within 120m)</div>
+      <div class="leg-item" id="leg-ruleC"><div class="leg-line dashed" style="color:#222"></div>Rule C (120m above TOAL)</div>
     </div>
     <div id="info-cards">
       <div class="i-card"><div class="label">Route length</div><div class="value" id="ic-dist">&mdash;</div><div class="unit">metres</div></div>
@@ -445,6 +445,9 @@ document.addEventListener('click', () => settingsPanel.classList.remove('open'))
 
 // Rule checkboxes
 function applyRuleVisibility() {
+  document.getElementById('leg-ruleA').style.display    = showRuleA    ? '' : 'none';
+  document.getElementById('leg-ruleBarc').style.display  = showRuleBarc ? '' : 'none';
+  document.getElementById('leg-ruleC').style.display     = showRuleC    ? '' : 'none';
   if (!profileChart) return;
   const ds = profileChart.data.datasets;
   // Dataset indices: 0=DTM, 1=DSM, 2=RuleA, 3=RuleBarc, 4=RuleC
@@ -457,6 +460,7 @@ function applyRuleVisibility() {
 document.getElementById('sg-ruleA').onchange    = function() { showRuleA    = this.checked; applyRuleVisibility(); };
 document.getElementById('sg-ruleBarc').onchange = function() { showRuleBarc = this.checked; applyRuleVisibility(); };
 document.getElementById('sg-ruleC').onchange    = function() { showRuleC    = this.checked; applyRuleVisibility(); };
+applyRuleVisibility();   // sync legend with default rule selection on load
 
 // File format
 function getFileFmt() {
@@ -945,17 +949,73 @@ document.getElementById('btn-png-map').onclick = async () => {
   setStatus('Map PNG saved.');
 };
 
+// Draws the (filtered) legend and the route metrics cards beneath the
+// profile chart on the exported PNG, mirroring what's shown on-screen.
+function drawProfileLegendAndMetrics(ctx, w, yTop) {
+  const rowH = 26;
+
+  // Legend row — only the rule lines currently selected, plus DTM/DSM
+  const legendItems = [
+    { label: 'DTM (bare earth)', color: '#7c5c2e', dashed: false, show: true },
+    { label: 'DSM (surface)', color: '#2a7a3b', dashed: false, show: true },
+    { label: 'Rule A (DTM+120m)', color: '#c94040', dashed: true, show: showRuleA },
+    { label: 'Rule B arc (nearest surface within 120m)', color: '#1a6fa8', dashed: true, show: showRuleBarc },
+    { label: 'Rule C (120m above TOAL)', color: '#222', dashed: true, show: showRuleC },
+  ].filter(it => it.show);
+
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, yTop, w, rowH);
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  let x = 10;
+  const midY = yTop + rowH / 2;
+  legendItems.forEach(it => {
+    ctx.strokeStyle = it.color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash(it.dashed ? [5, 3] : []);
+    ctx.beginPath();
+    ctx.moveTo(x, midY);
+    ctx.lineTo(x + 18, midY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#333';
+    ctx.fillText(it.label, x + 24, midY + 1);
+    x += 24 + ctx.measureText(it.label).width + 18;
+  });
+
+  // Metrics row — same cards shown in #info-cards
+  const metricsY = yTop + rowH;
+  ctx.fillStyle = '#f5f5f3';
+  ctx.fillRect(0, metricsY, w, rowH);
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.fillStyle = '#333';
+  let mx = 10;
+  const midY2 = metricsY + rowH / 2;
+  document.querySelectorAll('#info-cards .i-card').forEach(card => {
+    const label = card.querySelector('.label').textContent;
+    const value = card.querySelector('.value').textContent;
+    const unit  = card.querySelector('.unit').textContent;
+    const text = `${label}: ${value} ${unit}`;
+    ctx.fillText(text, mx, midY2 + 1);
+    mx += ctx.measureText(text).width + 24;
+  });
+
+  return rowH * 2;
+}
+
 document.getElementById('btn-png-profile').onclick = () => {
   if (!profileChart) { setStatus('Load a profile first.'); return; }
   const cc = document.getElementById('profile-chart');
+  const extraH = 52; // legend row + metrics row
   const out = document.createElement('canvas');
   out.width = cc.width;
-  out.height = cc.height + 22;
+  out.height = cc.height + 22 + extraH;
   const ctx = out.getContext('2d');
   ctx.fillStyle = 'white';
   ctx.fillRect(0, 0, out.width, out.height);
   const lh = addHeader(ctx, out.width, 'Drone Route — Terrain Profile');
   ctx.drawImage(cc, 0, lh);
+  drawProfileLegendAndMetrics(ctx, out.width, lh + cc.height);
   saveBlobAsPNG(out, 'drone-profile-' + timestamp() + '.png');
   setStatus('Profile PNG saved.');
 };
