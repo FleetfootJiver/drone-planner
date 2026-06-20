@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.11 -->
+<!-- Drone Route Planner v2.12 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1007,8 +1007,9 @@ document.getElementById('btn-png-profile').onclick = () => {
   if (!profileChart) { setStatus('Load a profile first.'); return; }
   const cc = document.getElementById('profile-chart');
   const extraH = 52; // legend row + metrics row
+  const extraW = 40; // right-hand margin so content/border isn't clipped
   const out = document.createElement('canvas');
-  out.width = cc.width;
+  out.width = cc.width + extraW;
   out.height = cc.height + 22 + extraH;
   const ctx = out.getContext('2d');
   ctx.fillStyle = 'white';
