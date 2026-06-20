@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.8 -->
+<!-- Drone Route Planner v2.7 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -200,8 +200,7 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 
   <div class="sg-section">
     <div class="sg-section-title">Rules displayed</div>
-    <div class="sg-row"><input type="checkbox" id="sg-ruleA" checked><label for="sg-ruleA">Rule A — 120m above terrain</label></div>
-    <div class="sg-row"><input type="checkbox" id="sg-ruleBlin" checked><label for="sg-ruleBlin">Rule B — nearest surface along route</label></div>
+    <div class="sg-row"><input type="checkbox" id="sg-ruleA"><label for="sg-ruleA">Rule A — 120m above terrain</label></div>
     <div class="sg-row"><input type="checkbox" id="sg-ruleBarc" checked><label for="sg-ruleBarc">Rule B — nearest surface within 120m</label></div>
     <div class="sg-row"><input type="checkbox" id="sg-ruleC"><label for="sg-ruleC">Rule C — 120m above TOAL</label></div>
   </div>
@@ -267,7 +266,7 @@ let waypoints = [], markers = [], routeLine = null, profileChart = null;
 let adding = true;
 
 // ── Rule visibility state (driven by settings checkboxes) ──────────────────
-let showRuleA    = true;
+let showRuleA    = false;
 let showRuleBlin = true;   // Rule B linear (nearest surface along route)
 let showRuleBarc = true;   // Rule B arc    (nearest surface within 120m)
 let showRuleC    = false;  // Rule C        (120m above TOAL / WP1)
@@ -451,10 +450,16 @@ document.getElementById('btn-profile').onclick = () => runProfile();
 // ── Settings panel ──────────────────────────────────────────────────────────
 const settingsPanel = document.getElementById('settings-panel');
 
-document.getElementById('btn-settings').onclick = () =>
+document.getElementById('btn-settings').onclick = (e) => {
+  e.stopPropagation();
   settingsPanel.classList.toggle('open');
+};
 document.getElementById('btn-settings-close').onclick = () =>
   settingsPanel.classList.remove('open');
+// Clicks inside the panel itself shouldn't bubble up and close it
+settingsPanel.addEventListener('click', (e) => e.stopPropagation());
+// Clicking the main window or any of its buttons closes the menu
+document.addEventListener('click', () => settingsPanel.classList.remove('open'));
 
 // Rule checkboxes
 function applyRuleVisibility() {
@@ -469,7 +474,6 @@ function applyRuleVisibility() {
 }
 
 document.getElementById('sg-ruleA').onchange    = function() { showRuleA    = this.checked; applyRuleVisibility(); };
-document.getElementById('sg-ruleBlin').onchange = function() { showRuleBlin = this.checked; applyRuleVisibility(); };
 document.getElementById('sg-ruleBarc').onchange = function() { showRuleBarc = this.checked; applyRuleVisibility(); };
 document.getElementById('sg-ruleC').onchange    = function() { showRuleC    = this.checked; applyRuleVisibility(); };
 
@@ -645,8 +649,8 @@ function hideModal() {
 // When WCS backend is added, replace fetchElevations() with a WCS call and
 // populate cachedBbox. The needsNewDownload() check below is already wired in.
 let cachedBbox = null;
-const WCS_BUFFER_M = 200;       // metres added each side when downloading
-const WCS_EDGE_MARGIN_M = 125;  // re-download if waypoint within this of edge
+const WCS_BUFFER_M = 500;       // metres added each side when downloading
+const WCS_EDGE_MARGIN_M = 150;  // re-download if waypoint within this of edge
 
 // Convert metres offset to approximate degrees (good enough at UK latitudes)
 function mToDegreesLat(m) { return m / 111320; }
@@ -1053,7 +1057,7 @@ function osgbBoundsToWgs84(bounds_osgb) {
   return { minLat:sw.lat, minLng:sw.lng, maxLat:ne.lat, maxLng:ne.lng };
 }
 
-const MAX_OSM_TILES = 300;
+const MAX_OSM_TILES = 64;
 
 function updateOsmZoomUI() {
   if (!_terrainGrid) return;

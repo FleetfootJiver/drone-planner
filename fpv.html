@@ -125,8 +125,8 @@ canvas { display:block; width:100%!important; height:100%!important; }
 </div>
 <div id="fpv-settings-panel">
   <div class="fpv-sg-title">Camera altitude</div>
-  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-agla" value="agla" checked><label for="fpv-alt-agla">120 m AGL</label></div>
-  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-ruleb" value="ruleb"><label for="fpv-alt-ruleb">Rule B</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-agla" value="agla"><label for="fpv-alt-agla">120 m AGL</label></div>
+  <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-ruleb" value="ruleb" checked><label for="fpv-alt-ruleb">Rule B</label></div>
   <div class="fpv-sg-row"><input type="radio" name="fpv-alt" id="fpv-alt-toal" value="toal"><label for="fpv-alt-toal">120 m TOAL</label></div>
   <hr class="fpv-sg-divider">
   <div class="fpv-sg-title">Drone speed</div>
@@ -713,7 +713,7 @@ const totalDist = wpDist[wpDist.length - 1];
 // 'agla'  = DTM + 120 m (Rule A)
 // 'ruleb' = Rule B arc ceiling passed from main page
 // 'toal'  = DTM[0] + 120 m (fixed TOAL = first sample)
-const altMode   = data.altMode || 'agla';
+const altMode   = data.altMode || 'ruleb';
 const ruleBData = data.ruleB  || null;   // Float32Array-like from main page, or null
 
 // TOAL altitude = DTM at first sample + 120 m (computed once)
@@ -825,6 +825,8 @@ document.getElementById('fpv-settings-btn').onclick = (e) => {
   fpvSettingsPanel.classList.toggle('open');
 };
 document.addEventListener('click', () => fpvSettingsPanel.classList.remove('open'));
+// Clicks inside the panel (changing an option) shouldn't close the menu
+fpvSettingsPanel.addEventListener('click', (e) => e.stopPropagation());
 
 function rebuildPath() {
   for (let s = 0; s < nSamples; s++) {
@@ -835,7 +837,6 @@ function rebuildPath() {
 
 document.querySelectorAll('input[name="fpv-alt"]').forEach(r =>
   r.addEventListener('change', () => {
-    fpvSettingsPanel.classList.remove('open');
     rebuildPath();
   })
 );
