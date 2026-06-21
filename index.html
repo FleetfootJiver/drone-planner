@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.12 -->
+<!-- Drone Route Planner v2.13 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1096,7 +1096,7 @@ function osgbBoundsToWgs84(bounds_osgb) {
   return { minLat:sw.lat, minLng:sw.lng, maxLat:ne.lat, maxLng:ne.lng };
 }
 
-const MAX_OSM_TILES = 64;
+const MAX_OSM_TILES = 300;
 
 function updateOsmZoomUI() {
   if (!_terrainGrid) return;
