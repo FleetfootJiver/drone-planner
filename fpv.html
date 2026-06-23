@@ -1,4 +1,4 @@
-<!-- FPV View v2.11 -->
+<!-- FPV View v2.12 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -525,11 +525,12 @@ async function loadOsmTexture() {
   // → tile canvas X = (lng - tileSW_lng)/(tileNE_lng-tileSW_lng) * cvs.width
   // Do this as a drawImage transform — compute src rect corners and use drawImage
 
+  // Source crop in the tile canvas: use the full extent of all 4 corners
+  // so the crop is correct for rotated grids (not just SW and NE corners).
+  const allLngs = [sw.lng, ne.lng, osmTile2lng(tx0, z), osmTile2lng(tx1+1, z)];
+  const allLats = [sw.lat, ne.lat, osmTile2lat(ty0, z), osmTile2lat(ty1+1, z)];
   const srcX0 = (sw.lng - tileSW_lng) / (tileNE_lng - tileSW_lng) * cvs.width;
   const srcX1 = (ne.lng - tileSW_lng) / (tileNE_lng - tileSW_lng) * cvs.width;
-  // Tile Y: tile rows go north→south (ty0=north), our terrain rows go south→north
-  // texCvs row 0 = southernmost = sw.lat
-  // In tile canvas: lat → tile_y = (tileNE_lat-lat)/(tileNE_lat-tileSW_lat)*cvs.height
   const srcY_south = (tileNE_lat - sw.lat) / (tileNE_lat - tileSW_lat) * cvs.height;
   const srcY_north = (tileNE_lat - ne.lat) / (tileNE_lat - tileSW_lat) * cvs.height;
 
@@ -553,17 +554,44 @@ async function loadOsmTexture() {
   mat.vertexColors = false;
   mat.needsUpdate  = true;
 
-  // Build UV per chunk: each chunk's vertex rows map to the same global
-  // (col/W, row/H) UV space since the texture covers the full grid.
+  // Build UV per chunk using bilinear interpolation of the 4 OSGB corner WGS84
+  // positions, rather than linear col/row fractions.
+  //
+  // Why: OSGB grid lines are NOT parallel to WGS84 lat/lng lines — the grid is
+  // rotated by the "grid convergence" angle (~1.5° at 0.1°E, southern England).
+  // Using col/(W-1) and row/(H-1) directly as UVs treats OSGB as WGS84-aligned,
+  // which causes the texture to appear correctly registered at the route midpoint
+  // but progressively rotated off in both directions toward the ends.
+  //
+  // The fix: compute WGS84 (lat, lng) for the 4 OSGB grid corners, then for each
+  // vertex bilinearly interpolate its WGS84 position and map that to UV space.
+  // Bilinear interpolation is accurate to sub-metre over areas of a few km, which
+  // is well within the OSM tile pixel resolution at zoom 17–19.
+  const cornerSW = osgbToWgs84(gMinX, gMinY);
+  const cornerSE = osgbToWgs84(gMaxX, gMinY);
+  const cornerNW = osgbToWgs84(gMinX, gMaxY);
+  const cornerNE = osgbToWgs84(gMaxX, gMaxY);
+
+  // Texture U maps sw.lng→0, ne.lng→1; V maps sw.lat→0, ne.lat→1.
+  const uRange = ne.lng - sw.lng;
+  const vRange = ne.lat - sw.lat;
+
   for (const cGeo of terrainMeshes) {
     const { vRowStart, chunkH } = cGeo.userData;
     const cUvs = new Float32Array(chunkH * W * 2);
     for (let r = 0; r < chunkH; r++) {
       const globalRow = vRowStart + r;
+      const ry = globalRow / (H - 1);   // 0 = south (gMinY), 1 = north (gMaxY)
       for (let col = 0; col < W; col++) {
+        const cx = col / (W - 1);        // 0 = west (gMinX), 1 = east (gMaxX)
+        // Bilinear interpolation of WGS84 from the 4 OSGB corners
+        const lng = (1-cx)*(1-ry)*cornerSW.lng + cx*(1-ry)*cornerSE.lng
+                  + (1-cx)*    ry*cornerNW.lng  + cx*    ry*cornerNE.lng;
+        const lat = (1-cx)*(1-ry)*cornerSW.lat + cx*(1-ry)*cornerSE.lat
+                  + (1-cx)*    ry*cornerNW.lat  + cx*    ry*cornerNE.lat;
         const i = r * W + col;
-        cUvs[i*2]   = col / (W-1);
-        cUvs[i*2+1] = globalRow / (H-1);
+        cUvs[i*2]   = (lng - sw.lng) / uRange;
+        cUvs[i*2+1] = (lat - sw.lat) / vRange;
       }
     }
     cGeo.setAttribute('uv', new THREE.BufferAttribute(cUvs, 2));
@@ -713,6 +741,60 @@ function wgs84ToOsgb(lat_deg, lng_deg) {
     e: E0+IV*dL+V*dL**3+VI*dL**5,
     n: I+II*dL**2+III*dL**4+IIIA*dL**6
   };
+}
+
+function osgbToWgs84(e_in, n_in) {
+  // Step 1: OSGB National Grid TM → OSGB36 geographic (Airy 1830 ellipsoid)
+  const aA=6377563.396, fA=1/299.3249646, bA=aA*(1-fA), e2A=2*fA-fA*fA;
+  const F0=0.9996012717;
+  const lat0=49*Math.PI/180, lng0=-2*Math.PI/180, N0=-100000, E0=400000;
+  const nn=(aA-bA)/(aA+bA), nn2=nn*nn, nn3=nn*nn2;
+  // Iterative solution for latitude from northing
+  let lat=lat0+(n_in-N0)/(aA*F0);
+  for (let i=0; i<10; i++) {
+    const M=bA*F0*(
+      (1+nn+1.25*nn2+1.25*nn3)*(lat-lat0)
+      -(3*nn+3*nn2+2.625*nn3)*Math.sin(lat-lat0)*Math.cos(lat+lat0)
+      +(1.875*nn2+1.875*nn3)*Math.sin(2*(lat-lat0))*Math.cos(2*(lat+lat0))
+      -(35/24)*nn3*Math.sin(3*(lat-lat0))*Math.cos(3*(lat+lat0)));
+    const diff=n_in-N0-M; lat+=diff/(aA*F0); if(Math.abs(diff)<1e-5) break;
+  }
+  const sinL=Math.sin(lat), cosL=Math.cos(lat), tanL=Math.tan(lat);
+  const nu=aA*F0/Math.sqrt(1-e2A*sinL*sinL);
+  const rho=aA*F0*(1-e2A)/Math.pow(1-e2A*sinL*sinL,1.5);
+  const eta2=nu/rho-1;
+  const dE=e_in-E0;
+  const lat2=lat
+    -(tanL/(2*rho*nu))*dE**2
+    +(tanL/(24*rho*nu**3))*(5+3*tanL**2+eta2-9*tanL**2*eta2)*dE**4
+    -(tanL/(720*rho*nu**5))*(61+90*tanL**2+45*tanL**4)*dE**6;
+  const lng2=lng0
+    +dE/(nu*cosL)
+    -dE**3/(6*nu**3*cosL)*(nu/rho+2*tanL**2)
+    +dE**5/(120*nu**5*cosL)*(5+28*tanL**2+24*tanL**4);
+  // Step 2: OSGB36 geographic → OSGB36 cartesian (Airy 1830)
+  const nu2=aA/Math.sqrt(1-e2A*Math.sin(lat2)**2);
+  const x1=nu2*Math.cos(lat2)*Math.cos(lng2);
+  const y1=nu2*Math.cos(lat2)*Math.sin(lng2);
+  const z1=nu2*(1-e2A)*Math.sin(lat2);
+  // Step 3: Helmert transform OSGB36 → WGS84 (exact inverse of wgs84ToOsgb parameters)
+  const tx=446.448, ty=-125.157, tz=542.060;
+  const rx=0.1502, ry=0.2470, rz=0.8421;   // arc-seconds (all negated vs wgs84ToOsgb)
+  const s=-20.4894e-6;                       // negated vs wgs84ToOsgb
+  const rxr=rx*Math.PI/(180*3600), ryr=ry*Math.PI/(180*3600), rzr=rz*Math.PI/(180*3600);
+  const x2=tx+(1+s)*(x1-rzr*y1+ryr*z1);
+  const y2=ty+(1+s)*(rzr*x1+y1-rxr*z1);
+  const z2=tz+(1+s)*(-ryr*x1+rxr*y1+z1);
+  // Step 4: WGS84 cartesian → WGS84 geographic (GRS80 ellipsoid)
+  const aW=6378137.0, fW=1/298.257223563, e2W=2*fW-fW*fW;
+  const p=Math.sqrt(x2*x2+y2*y2);
+  let lat3=Math.atan2(z2,p*(1-e2W));
+  for (let i=0; i<10; i++) {
+    const nuW=aW/Math.sqrt(1-e2W*Math.sin(lat3)**2);
+    const lat3n=Math.atan2(z2+e2W*nuW*Math.sin(lat3),p);
+    if (Math.abs(lat3n-lat3)<1e-12){lat3=lat3n;break;} lat3=lat3n;
+  }
+  return { lat: lat3*180/Math.PI, lng: Math.atan2(y2,x2)*180/Math.PI };
 }
 
 function osgbToWorld(e, n) {
