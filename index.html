@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.14 -->
+<!-- Drone Route Planner v2.15 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -143,6 +143,47 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 .sg-row label { cursor: pointer; }
 .sg-indent { padding-left: 16px; }
 .sg-tile-count { font-size:10px; color:#999; margin-left:4px; }
+
+/* Context menu */
+#ctx-menu {
+  display: none;
+  position: fixed;
+  z-index: 9000;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.18);
+  min-width: 200px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+#ctx-menu.visible { display: block; }
+.ctx-header {
+  padding: 6px 14px 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 2px;
+}
+.ctx-item {
+  padding: 7px 14px;
+  cursor: pointer;
+  color: #1a1a1a;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-item:hover { background: #f0f6ff; }
+.ctx-item.danger { color: #c94040; }
+.ctx-item.danger:hover { background: #fdf0f0; }
+.ctx-sep {
+  height: 1px;
+  background: #f0f0f0;
+  margin: 3px 0;
+}
 
 </style>
 </head>
@@ -378,6 +419,7 @@ function updateRoute() {
 }
 
 map.on('click', e => {
+  if (pendingInsert) return;   // handled by the insert-click listener below
   if (!adding) return;
   waypoints.push(e.latlng);
   invalidateTerrainGrid();
@@ -1219,7 +1261,331 @@ document.getElementById('btn-layout').onclick = function() {
   if (profileChart) profileChart.resize();
 };
 
+// ── Context menu ─────────────────────────────────────────────────────────────
+// Shared right-click menu for map and profile chart.
+//
+// Menu types:
+//   'waypoint'  – right-clicked on or near a waypoint marker (or its profile band)
+//   'segment'   – right-clicked between two waypoints on the route or profile
+//
+// In both cases a `pendingInsert` state machine handles the "insert before/after"
+// actions that need a follow-up map click to place the new waypoint.
+
+const ctxMenuEl = document.getElementById('ctx-menu');
+
+// pendingInsert: null | { mode: 'before'|'after'|'segment', index: number,
+//                         latlng?: L.LatLng }
+// 'before'  → next map click inserts a new WP before index
+// 'after'   → next map click inserts a new WP after index
+// 'segment' → a latlng is already known (right-click point on the route);
+//             insert immediately (no follow-up click needed for map, but
+//             for profile we still need a latlng, so we snap to the segment midpoint)
+let pendingInsert = null;
+
+function showCtxMenu(pageX, pageY, items) {
+  // items: array of { type:'header'|'item'|'sep', label?, icon?, action?, danger? }
+  ctxMenuEl.innerHTML = '';
+  items.forEach(it => {
+    if (it.type === 'header') {
+      const d = document.createElement('div');
+      d.className = 'ctx-header';
+      d.textContent = it.label;
+      ctxMenuEl.appendChild(d);
+    } else if (it.type === 'sep') {
+      const d = document.createElement('div');
+      d.className = 'ctx-sep';
+      ctxMenuEl.appendChild(d);
+    } else {
+      const d = document.createElement('div');
+      d.className = 'ctx-item' + (it.danger ? ' danger' : '');
+      d.innerHTML = (it.icon ? '<span>' + it.icon + '</span>' : '') + it.label;
+      d.addEventListener('click', () => { hideCtxMenu(); it.action(); });
+      ctxMenuEl.appendChild(d);
+    }
+  });
+
+  // Position: keep within viewport
+  ctxMenuEl.classList.add('visible');
+  const mw = ctxMenuEl.offsetWidth, mh = ctxMenuEl.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let x = pageX, y = pageY;
+  if (x + mw > vw - 6) x = vw - mw - 6;
+  if (y + mh > vh - 6) y = vh - mh - 6;
+  ctxMenuEl.style.left = x + 'px';
+  ctxMenuEl.style.top  = y + 'px';
+}
+
+function hideCtxMenu() {
+  ctxMenuEl.classList.remove('visible');
+}
+
+// Hide on any click outside the menu
+document.addEventListener('click', e => {
+  if (!ctxMenuEl.contains(e.target)) hideCtxMenu();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { hideCtxMenu(); cancelPendingInsert(); }
+});
+
+function cancelPendingInsert() {
+  if (!pendingInsert) return;
+  pendingInsert = null;
+  setStatus('Insert cancelled.');
+}
+
+// ── Waypoint menu ─────────────────────────────────────────────────────────────
+function showWaypointMenu(pageX, pageY, wpIndex, clickedLatlng) {
+  const n = wpIndex + 1; // 1-based label
+  const items = [
+    { type: 'header', label: 'Waypoint ' + n },
+  ];
+  if (clickedLatlng) {
+    // Map right-click — offer "move here"
+    items.push({
+      type: 'item', icon: '↕', label: 'Move WP' + n + ' here',
+      action: () => {
+        waypoints[wpIndex] = clickedLatlng;
+        invalidateTerrainGrid();
+        updateRoute();
+        setStatus('Waypoint ' + n + ' moved.');
+      }
+    });
+    items.push({ type: 'sep' });
+  }
+  items.push({
+    type: 'item', icon: '⊕', label: 'Insert new waypoint before WP' + n,
+    action: () => {
+      pendingInsert = { mode: 'before', index: wpIndex };
+      setStatus('Click the map to place new waypoint before WP' + n + '. [Esc to cancel]');
+    }
+  });
+  items.push({
+    type: 'item', icon: '⊕', label: 'Insert new waypoint after WP' + n,
+    action: () => {
+      pendingInsert = { mode: 'after', index: wpIndex };
+      setStatus('Click the map to place new waypoint after WP' + n + '. [Esc to cancel]');
+    }
+  });
+  items.push({ type: 'sep' });
+  items.push({
+    type: 'item', icon: '✕', label: 'Delete WP' + n,
+    danger: true,
+    action: () => {
+      waypoints.splice(wpIndex, 1);
+      invalidateTerrainGrid();
+      updateMarkers();
+      updateRoute();
+      setStatus('Waypoint ' + n + ' deleted.');
+    }
+  });
+  showCtxMenu(pageX, pageY, items);
+}
+
+// ── Segment menu ──────────────────────────────────────────────────────────────
+// segIndex: the segment between waypoints[segIndex] and waypoints[segIndex+1]
+// insertLatlng: if non-null (map click), insert immediately at that position
+function showSegmentMenu(pageX, pageY, segIndex, insertLatlng) {
+  const a = segIndex + 1, b = segIndex + 2;
+  const items = [
+    { type: 'header', label: 'Segment WP' + a + ' → WP' + b },
+    {
+      type: 'item', icon: '⊕', label: 'Insert waypoint here',
+      action: () => {
+        if (insertLatlng) {
+          // Direct insert at the right-clicked map position
+          waypoints.splice(segIndex + 1, 0, insertLatlng);
+          invalidateTerrainGrid();
+          updateMarkers();
+          updateRoute();
+          setStatus('New waypoint inserted between WP' + a + ' and WP' + b + '.');
+        } else {
+          // Profile click — insert at midpoint of segment, user can drag to refine
+          const mid = L.latLng(
+            (waypoints[segIndex].lat + waypoints[segIndex + 1].lat) / 2,
+            (waypoints[segIndex].lng + waypoints[segIndex + 1].lng) / 2
+          );
+          waypoints.splice(segIndex + 1, 0, mid);
+          invalidateTerrainGrid();
+          updateMarkers();
+          updateRoute();
+          setStatus('New waypoint inserted at segment midpoint — drag to reposition.');
+        }
+      }
+    },
+  ];
+  showCtxMenu(pageX, pageY, items);
+}
+
+// ── Map right-click hit testing ───────────────────────────────────────────────
+// Returns { type:'waypoint'|'segment'|'none', index }
+// 'waypoint' index: waypoint index
+// 'segment'  index: the segment between index and index+1
+const MAP_WP_HIT_PX   = 16;  // pixel radius to count as "on a waypoint"
+const MAP_SEG_HIT_PX  = 10;  // pixel distance to count as "on a segment"
+
+function mapHitTest(leafletEvent) {
+  const clickPt = map.latLngToContainerPoint(leafletEvent.latlng);
+
+  // 1. Check waypoints first
+  for (let i = 0; i < waypoints.length; i++) {
+    const wPt = map.latLngToContainerPoint(waypoints[i]);
+    const dx = clickPt.x - wPt.x, dy = clickPt.y - wPt.y;
+    if (Math.sqrt(dx*dx + dy*dy) <= MAP_WP_HIT_PX) {
+      return { type: 'waypoint', index: i };
+    }
+  }
+
+  // 2. Check segments
+  if (waypoints.length >= 2) {
+    for (let i = 0; i < waypoints.length - 1; i++) {
+      const aPt = map.latLngToContainerPoint(waypoints[i]);
+      const bPt = map.latLngToContainerPoint(waypoints[i + 1]);
+      if (pointToSegmentDist(clickPt, aPt, bPt) <= MAP_SEG_HIT_PX) {
+        return { type: 'segment', index: i };
+      }
+    }
+  }
+
+  return { type: 'none', index: -1 };
+}
+
+// Distance from point p to line segment a→b (all L.Point-like {x,y})
+function pointToSegmentDist(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lenSq = dx*dx + dy*dy;
+  if (lenSq === 0) {
+    const ex = p.x - a.x, ey = p.y - a.y;
+    return Math.sqrt(ex*ex + ey*ey);
+  }
+  let t = ((p.x - a.x)*dx + (p.y - a.y)*dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const nx = a.x + t*dx - p.x, ny = a.y + t*dy - p.y;
+  return Math.sqrt(nx*nx + ny*ny);
+}
+
+// Snap a latlng to the nearest point on the segment a→b (returns L.LatLng)
+function snapToSegment(latlng, a, b) {
+  const clickPt = map.latLngToContainerPoint(latlng);
+  const aPt = map.latLngToContainerPoint(a);
+  const bPt = map.latLngToContainerPoint(b);
+  const dx = bPt.x - aPt.x, dy = bPt.y - aPt.y;
+  const lenSq = dx*dx + dy*dy;
+  if (lenSq === 0) return a;
+  let t = ((clickPt.x - aPt.x)*dx + (clickPt.y - aPt.y)*dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return L.latLng(
+    a.lat + t * (b.lat - a.lat),
+    a.lng + t * (b.lng - a.lng)
+  );
+}
+
+// Map contextmenu event
+map.on('contextmenu', e => {
+  L.DomEvent.preventDefault(e);  // suppress browser menu over map
+  const hit = mapHitTest(e);
+  if (hit.type === 'waypoint') {
+    showWaypointMenu(e.originalEvent.clientX, e.originalEvent.clientY,
+                     hit.index, e.latlng);
+  } else if (hit.type === 'segment') {
+    const snapped = snapToSegment(e.latlng,
+                                   waypoints[hit.index],
+                                   waypoints[hit.index + 1]);
+    showSegmentMenu(e.originalEvent.clientX, e.originalEvent.clientY,
+                    hit.index, snapped);
+  }
+  // If 'none', let the browser default run (or do nothing)
+});
+
+// Handle pending insert: next map click places the new waypoint
+map.on('click', e => {
+  if (!pendingInsert) return;
+  const { mode, index } = pendingInsert;
+  pendingInsert = null;
+  const insertAt = mode === 'before' ? index : index + 1;
+  waypoints.splice(insertAt, 0, e.latlng);
+  invalidateTerrainGrid();
+  updateMarkers();
+  updateRoute();
+  const n = insertAt + 1;
+  setStatus('New waypoint WP' + n + ' inserted. Drag to reposition, or press Calculate profile.');
+});
+
+// ── Profile chart right-click hit testing ─────────────────────────────────────
+// Waypoint distance bands: within CHART_WP_BAND_PX pixels of a waypoint's
+// x-position is treated as "on that waypoint".
+const CHART_WP_BAND_PX = 14;
+
+// Compute cumulative distances to each waypoint (mirrors the plugin logic)
+function wpCumDists() {
+  if (waypoints.length < 2) return [];
+  const d = [0];
+  for (let i = 1; i < waypoints.length; i++) {
+    d.push(Math.round(d[i-1] + haversine(waypoints[i-1], waypoints[i])));
+  }
+  return d;
+}
+
+document.getElementById('profile-chart').addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (!profileChart || waypoints.length < 2) return;
+
+  const canvas = e.currentTarget;
+  const rect   = canvas.getBoundingClientRect();
+  // Chart.js stores scale positions in canvas (physical) pixels.
+  // clientX is in CSS pixels; multiply by DPR to get canvas coordinates.
+  const dpr    = window.devicePixelRatio || 1;
+  const canvasX = (e.clientX - rect.left) * dpr;
+
+  const xAxis      = profileChart.scales.x;
+  const chartLeft  = xAxis.left;    // canvas px
+  const chartRight = xAxis.right;   // canvas px
+
+  if (canvasX < chartLeft || canvasX > chartRight) return; // outside plot area
+
+  // Convert canvas pixel x to distance index
+  const xRatio    = (canvasX - chartLeft) / (chartRight - chartLeft);
+  const distArr   = profileChart.data.labels;          // array of distance values (m)
+  const rawIndex  = xRatio * (distArr.length - 1);
+  const distIndex = Math.max(0, Math.min(distArr.length - 1, Math.round(rawIndex)));
+
+  // Compare to waypoint x positions
+  const cumDists = wpCumDists();
+  for (let wi = 0; wi < cumDists.length; wi++) {
+    // Find the profile index closest to this waypoint's cumulative distance
+    let closest = 0, minDiff = Infinity;
+    for (let i = 0; i < distArr.length; i++) {
+      const diff = Math.abs(distArr[i] - cumDists[wi]);
+      if (diff < minDiff) { minDiff = diff; closest = i; }
+    }
+    const wpCanvasPx = chartLeft + (closest / (distArr.length - 1)) * (chartRight - chartLeft);
+    // CHART_WP_BAND_PX is in CSS pixels; scale to canvas pixels for comparison
+    if (Math.abs(canvasX - wpCanvasPx) <= CHART_WP_BAND_PX * dpr) {
+      // On waypoint wi — no clickedLatlng (profile click)
+      showWaypointMenu(e.clientX, e.clientY, wi, null);
+      return;
+    }
+  }
+
+  // Between waypoints — find which segment distIndex falls in
+  for (let si = 0; si < cumDists.length - 1; si++) {
+    // Find profile indices for start/end of this segment
+    let startIdx = 0, endIdx = distArr.length - 1, minS = Infinity, minE = Infinity;
+    for (let i = 0; i < distArr.length; i++) {
+      const dS = Math.abs(distArr[i] - cumDists[si]);
+      const dE = Math.abs(distArr[i] - cumDists[si + 1]);
+      if (dS < minS) { minS = dS; startIdx = i; }
+      if (dE < minE) { minE = dE; endIdx = i; }
+    }
+    if (distIndex >= startIdx && distIndex <= endIdx) {
+      showSegmentMenu(e.clientX, e.clientY, si, null); // null = use midpoint
+      return;
+    }
+  }
+});
+
 });</script>
+
+<div id="ctx-menu"></div>
 
 <div id="modal-overlay">
   <div id="modal-box">
