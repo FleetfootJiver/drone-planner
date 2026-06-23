@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.15 -->
+<!-- Drone Route Planner v2.16 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1279,7 +1279,7 @@ const ctxMenuEl = document.getElementById('ctx-menu');
 // 'after'   → next map click inserts a new WP after index
 // 'segment' → a latlng is already known (right-click point on the route);
 //             insert immediately (no follow-up click needed for map, but
-//             for profile we still need a latlng, so we snap to the segment midpoint)
+//             latlng is computed by interpolating along the segment at the clicked distance)
 let pendingInsert = null;
 
 function showCtxMenu(pageX, pageY, items) {
@@ -1391,25 +1391,16 @@ function showSegmentMenu(pageX, pageY, segIndex, insertLatlng) {
     {
       type: 'item', icon: '⊕', label: 'Insert waypoint here',
       action: () => {
-        if (insertLatlng) {
-          // Direct insert at the right-clicked map position
-          waypoints.splice(segIndex + 1, 0, insertLatlng);
-          invalidateTerrainGrid();
-          updateMarkers();
-          updateRoute();
-          setStatus('New waypoint inserted between WP' + a + ' and WP' + b + '.');
-        } else {
-          // Profile click — insert at midpoint of segment, user can drag to refine
-          const mid = L.latLng(
-            (waypoints[segIndex].lat + waypoints[segIndex + 1].lat) / 2,
-            (waypoints[segIndex].lng + waypoints[segIndex + 1].lng) / 2
-          );
-          waypoints.splice(segIndex + 1, 0, mid);
-          invalidateTerrainGrid();
-          updateMarkers();
-          updateRoute();
-          setStatus('New waypoint inserted at segment midpoint — drag to reposition.');
+        if (!insertLatlng) {
+          // Fallback: should not happen — both map and profile now provide a latlng
+          console.warn('showSegmentMenu called without insertLatlng');
+          return;
         }
+        waypoints.splice(segIndex + 1, 0, insertLatlng);
+        invalidateTerrainGrid();
+        updateMarkers();
+        updateRoute();
+        setStatus('New waypoint inserted between WP' + a + ' and WP' + b + '.');
       }
     },
   ];
@@ -1566,18 +1557,20 @@ document.getElementById('profile-chart').addEventListener('contextmenu', e => {
     }
   }
 
-  // Between waypoints — find which segment distIndex falls in
+  // Between waypoints — find which segment distIndex falls in and interpolate latlng
+  // distArr[distIndex] is the cumulative distance in metres at the click point.
+  // We find t = fraction through the segment [cumDists[si] .. cumDists[si+1]]
+  // then linearly interpolate lat/lng to get the true insertion position.
+  const clickedDist = distArr[distIndex];   // metres from start of route
   for (let si = 0; si < cumDists.length - 1; si++) {
-    // Find profile indices for start/end of this segment
-    let startIdx = 0, endIdx = distArr.length - 1, minS = Infinity, minE = Infinity;
-    for (let i = 0; i < distArr.length; i++) {
-      const dS = Math.abs(distArr[i] - cumDists[si]);
-      const dE = Math.abs(distArr[i] - cumDists[si + 1]);
-      if (dS < minS) { minS = dS; startIdx = i; }
-      if (dE < minE) { minE = dE; endIdx = i; }
-    }
-    if (distIndex >= startIdx && distIndex <= endIdx) {
-      showSegmentMenu(e.clientX, e.clientY, si, null); // null = use midpoint
+    if (clickedDist >= cumDists[si] && clickedDist <= cumDists[si + 1]) {
+      const segLen = cumDists[si + 1] - cumDists[si];
+      const t = segLen > 0 ? (clickedDist - cumDists[si]) / segLen : 0.5;
+      const insertLatlng = L.latLng(
+        waypoints[si].lat + t * (waypoints[si + 1].lat - waypoints[si].lat),
+        waypoints[si].lng + t * (waypoints[si + 1].lng - waypoints[si].lng)
+      );
+      showSegmentMenu(e.clientX, e.clientY, si, insertLatlng);
       return;
     }
   }
