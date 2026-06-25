@@ -743,8 +743,8 @@ function saveKML() {
   if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
   const name = getRouteName();
   const pm = waypoints.map((wp, i) =>
-    '  <Placemark><name>WP' + (i+1) + '</name><Point><coordinates>'\
-    + wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0</coordinates></Point></Placemark>'\
+    '  <Placemark><name>WP' + (i+1) + '</name><Point><coordinates>'
+    + wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0</coordinates></Point></Placemark>'
   ).join('\n');
   const coords = waypoints.map(wp => wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0').join(' ');
   const kml = [
