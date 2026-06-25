@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.16 -->
+<!-- Drone Route Planner v2.17 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -142,7 +142,30 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 .sg-row input[type=checkbox] { margin: 0; cursor: pointer; accent-color: #1a6fa8; }
 .sg-row label { cursor: pointer; }
 .sg-indent { padding-left: 16px; }
-.sg-tile-count { font-size:10px; color:#999; margin-left:4px; }
+#route-name-box {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #555;
+}
+#route-name-box label { white-space: nowrap; }
+#route-name-input {
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  width: 160px;
+  color: #1a1a1a;
+  background: white;
+}
+#route-name-input:focus {
+  outline: none;
+  border-color: #1a6fa8;
+  box-shadow: 0 0 0 2px rgba(26,111,168,0.15);
+}
+
+
 
 /* Context menu */
 #ctx-menu {
@@ -195,8 +218,12 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 <div id="toolbar">
   <button class="tb-btn active" id="btn-add">+ Add waypoint</button>
   <button class="tb-btn danger" id="btn-clear">Clear all</button>
-  <button class="tb-btn" id="btn-profile">&#x25B6; Calculate profile</button>
   <span id="wp-count">0 waypoints</span>
+  <button class="tb-btn" id="btn-profile">&#x25B6; Calculate profile</button>
+  <div id="route-name-box">
+    <label for="route-name-input">Route:</label>
+    <input type="text" id="route-name-input" placeholder="Unnamed route" maxlength="80" autocomplete="off">
+  </div>
   <button class="tb-btn" id="btn-save">&#x2913; Save route</button>
   <button class="tb-btn" id="btn-load">&#x2912; Load route</button>
   <button class="tb-btn" id="btn-png-map">&#x1F5FA; Map PNG</button>
@@ -237,6 +264,17 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 <!-- Settings panel (slides in over the right edge of the layout wrapper) -->
 <div id="settings-panel">
   <h2>Settings <button id="btn-settings-close" title="Close">&#x2715;</button></h2>
+
+  <div class="sg-section">
+    <div class="sg-section-title">Output folder</div>
+    <div class="sg-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+      <button class="tb-btn" id="btn-choose-folder" style="font-size:11px;padding:4px 10px;">&#x1F4C1; Choose folder…</button>
+      <span id="sg-folder-path" style="font-size:10px;color:#888;word-break:break-all;padding-left:2px;">No folder selected — files saved to Downloads</span>
+    </div>
+    <div style="font-size:10px;color:#aaa;padding:4px 2px 2px;line-height:1.5;">
+      Sub-folders: Routes · Images · Stills · Videos
+    </div>
+  </div>
 
   <div class="sg-section">
     <div class="sg-section-title">Rules displayed</div>
@@ -291,6 +329,142 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 
 let waypoints = [], markers = [], routeLine = null, profileChart = null;
 let adding = true;
+
+// ── Route name ──────────────────────────────────────────────────────────────
+let routeName = '';   // current route name (set from input box or filename on load)
+
+function getRouteName() {
+  return document.getElementById('route-name-input').value.trim() || 'Unnamed route';
+}
+
+function setRouteName(name) {
+  routeName = name;
+  document.getElementById('route-name-input').value = name;
+}
+
+// Strip leading/trailing whitespace and characters illegal in most filenames
+function sanitiseFilename(s) {
+  return s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'route';
+}
+
+// ── File-naming with session-level clash avoidance ──────────────────────────
+// Tracks the next suffix number for each base name within this session.
+// { 'My Route - map': 0 }  →  0 = not yet used (no suffix)
+//                           →  1 = ' - 001' is next
+const _saveCounters = {};
+
+// Returns a filename: base + (optional suffix) + '.' + ext
+// First call for a given base: no suffix.  Subsequent calls: ' - 001', ' - 002', …
+function resolveFilename(base, ext) {
+  const key = base + '.' + ext;
+  if (!(key in _saveCounters)) {
+    _saveCounters[key] = 1;        // mark as used; next call gets 001
+    return base + '.' + ext;
+  }
+  const n = _saveCounters[key]++;
+  return base + ' - ' + String(n).padStart(3, '0') + '.' + ext;
+}
+
+// ── Output folder (File System Access API) ──────────────────────────────────
+let _baseDir = null;   // FileSystemDirectoryHandle | null
+
+async function chooseOutputFolder() {
+  if (!window.showDirectoryPicker) {
+    alert('Your browser does not support folder selection (requires Chrome/Edge 86+). Files will be saved to your Downloads folder.');
+    return;
+  }
+  try {
+    _baseDir = await window.showDirectoryPicker({ mode: 'readwrite', id: 'drone-planner-output' });
+    document.getElementById('sg-folder-path').textContent = _baseDir.name;
+  } catch(e) {
+    if (e.name !== 'AbortError') {
+      alert('Could not open folder: ' + e.message);
+    }
+  }
+}
+
+// Get (creating if needed) a sub-directory: _baseDir / subFolder / routeSubDir
+// routeSubDir is optional; pass '' to get just _baseDir / subFolder
+async function getOutputDir(subFolder, routeSubDir) {
+  if (!_baseDir) return null;
+  try {
+    const sub = await _baseDir.getDirectoryHandle(subFolder, { create: true });
+    if (!routeSubDir) return sub;
+    return await sub.getDirectoryHandle(routeSubDir, { create: true });
+  } catch(e) {
+    console.error('getOutputDir failed:', e);
+    return null;
+  }
+}
+
+// Write a Blob to a FileSystemDirectoryHandle under filename.
+// Returns true on success.
+async function writeToDir(dirHandle, filename, blob) {
+  try {
+    const fh = await dirHandle.getFileHandle(filename, { create: true });
+    const ws = await fh.createWritable();
+    await ws.write(blob);
+    await ws.close();
+    return true;
+  } catch(e) {
+    console.error('writeToDir failed:', e);
+    return false;
+  }
+}
+
+// Download blob via <a> tag (fallback when no folder is selected)
+function downloadBlob(filename, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// Save a PNG canvas to the appropriate sub-folder (or Downloads)
+// subFolder: 'Images' | 'Stills' | 'Videos'
+// routeSubDir: route name (used for Stills/Videos sub-folders), or '' for Images
+async function savePngFile(canvas, subFolder, routeSubDir, filename) {
+  return new Promise(resolve => {
+    canvas.toBlob(async blob => {
+      let saved = false;
+      if (_baseDir) {
+        const dir = await getOutputDir(subFolder, routeSubDir);
+        if (dir) {
+          saved = await writeToDir(dir, filename, blob);
+        }
+      }
+      if (!saved) {
+        downloadBlob(filename, blob);
+      }
+      resolve();
+    }, 'image/png');
+  });
+}
+
+// Save a text/binary file (routes, videos)
+async function saveRouteFile(text, subFolder, filename) {
+  const ext  = filename.split('.').pop().toLowerCase();
+  const mime = ext === 'kml' ? 'application/vnd.google-earth.kml+xml'
+             : ext === 'geojson' ? 'application/geo+json'
+             : 'text/csv';
+  const blob = new Blob([text], { type: mime });
+  if (_baseDir) {
+    const dir = await getOutputDir(subFolder, '');
+    if (dir && await writeToDir(dir, filename, blob)) return;
+  }
+  downloadBlob(filename, blob);
+}
+
+async function saveVideoFile(blob, subFolder, routeSubDir, filename) {
+  if (_baseDir) {
+    const dir = await getOutputDir(subFolder, routeSubDir);
+    if (dir && await writeToDir(dir, filename, blob)) return;
+  }
+  downloadBlob(filename, blob);
+}
+
+
 
 // ── Rule visibility state (driven by settings checkboxes) ──────────────────
 let showRuleA    = false;
@@ -491,6 +665,11 @@ document.getElementById('sg-ruleBarc').onchange = function() { showRuleBarc = th
 document.getElementById('sg-ruleC').onchange    = function() { showRuleC    = this.checked; applyRuleVisibility(); };
 applyRuleVisibility();   // sync legend with default rule selection on load
 
+document.getElementById('btn-choose-folder').onclick = async (e) => {
+  e.stopPropagation();  // don't close settings panel
+  await chooseOutputFolder();
+};
+
 // File format
 function getFileFmt() {
   return document.querySelector('input[name="sg-fmt"]:checked').value;
@@ -554,41 +733,48 @@ function saveCSV() {
   if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
   const rows = ['index,latitude,longitude'];
   waypoints.forEach((wp, i) => rows.push((i+1) + ',' + wp.lat.toFixed(7) + ',' + wp.lng.toFixed(7)));
-  downloadFile('route-' + timestamp() + '.csv', rows.join('\n'), 'text/csv');
-  setStatus('Saved ' + waypoints.length + ' waypoints as CSV.');
+  const base = sanitiseFilename(getRouteName());
+  const filename = resolveFilename(base, 'csv');
+  saveRouteFile(rows.join('\n'), 'Routes', filename);
+  setStatus('Saved ' + waypoints.length + ' waypoints as ' + filename);
 }
 
 function saveKML() {
   if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
+  const name = getRouteName();
   const pm = waypoints.map((wp, i) =>
-    '  <Placemark><name>WP' + (i+1) + '</name><Point><coordinates>'
-    + wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0</coordinates></Point></Placemark>'
+    '  <Placemark><name>WP' + (i+1) + '</name><Point><coordinates>'\
+    + wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0</coordinates></Point></Placemark>'\
   ).join('\n');
   const coords = waypoints.map(wp => wp.lng.toFixed(7) + ',' + wp.lat.toFixed(7) + ',0').join(' ');
   const kml = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Drone Route</name>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>' + name + '</name>',
     pm,
     '  <Placemark><name>Route</name><LineString><tessellate>1</tessellate>',
     '    <coordinates>' + coords + '</coordinates></LineString></Placemark>',
     '</Document></kml>'
   ].join('\n');
-  downloadFile('route-' + timestamp() + '.kml', kml, 'application/vnd.google-earth.kml+xml');
-  setStatus('Saved ' + waypoints.length + ' waypoints as KML.');
+  const base = sanitiseFilename(name);
+  const filename = resolveFilename(base, 'kml');
+  saveRouteFile(kml, 'Routes', filename);
+  setStatus('Saved ' + waypoints.length + ' waypoints as ' + filename);
 }
 
 function saveGeoJSON() {
   if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
+  const name = getRouteName();
   const features = waypoints.map((wp, i) => ({
     type: 'Feature', properties: { index: i+1 },
     geometry: { type: 'Point', coordinates: [wp.lng, wp.lat] }
   }));
-  features.push({ type: 'Feature', properties: { name: 'Route' },
+  features.push({ type: 'Feature', properties: { name },
     geometry: { type: 'LineString', coordinates: waypoints.map(wp => [wp.lng, wp.lat]) }
   });
-  downloadFile('route-' + timestamp() + '.geojson',
-    JSON.stringify({ type: 'FeatureCollection', features }, null, 2), 'application/geo+json');
-  setStatus('Saved ' + waypoints.length + ' waypoints as GeoJSON.');
+  const base = sanitiseFilename(name);
+  const filename = resolveFilename(base, 'geojson');
+  saveRouteFile(JSON.stringify({ type: 'FeatureCollection', features }, null, 2), 'Routes', filename);
+  setStatus('Saved ' + waypoints.length + ' waypoints as ' + filename);
 }
 
 document.getElementById('btn-save').onclick = () => {
@@ -637,6 +823,8 @@ document.getElementById('load-input').onchange = function() {
     } catch(err) { setStatus('Error reading file: ' + err.message); return; }
     if (!loaded.length) { setStatus('No valid waypoints found in file.'); return; }
     waypoints = loaded.map(p => L.latLng(p.lat, p.lng));
+    // Set route name from filename (strip extension)
+    setRouteName(file.name.replace(/\.[^.]+$/, ''));
     invalidateTerrainGrid();
     updateRoute();
     if (markers.length > 0) map.fitBounds(L.featureGroup(markers).getBounds(), { padding: [40,40] });
@@ -972,10 +1160,12 @@ document.getElementById('btn-png-map').onclick = async () => {
   const ctx = out.getContext('2d');
   ctx.fillStyle = '#f5f5f3';
   ctx.fillRect(0, 0, out.width, out.height);
-  const lh = addHeader(ctx, out.width, 'Drone Route — Map');
+  const lh = addHeader(ctx, out.width, getRouteName() + ' — Map');
   ctx.drawImage(mc, 0, lh);
-  saveBlobAsPNG(out, 'drone-map-' + timestamp() + '.png');
-  setStatus('Map PNG saved.');
+  const base = sanitiseFilename(getRouteName()) + ' - map';
+  const filename = resolveFilename(base, 'png');
+  await savePngFile(out, 'Images', '', filename);
+  setStatus('Map PNG saved as ' + filename);
 };
 
 // Draws the (filtered) legend and the route metrics cards beneath the
@@ -1032,22 +1222,24 @@ function drawProfileLegendAndMetrics(ctx, w, yTop) {
   return rowH * 2;
 }
 
-document.getElementById('btn-png-profile').onclick = () => {
+document.getElementById('btn-png-profile').onclick = async () => {
   if (!profileChart) { setStatus('Load a profile first.'); return; }
   const cc = document.getElementById('profile-chart');
-  const extraH = 52; // legend row + metrics row
-  const extraW = 40; // right-hand margin so content/border isn't clipped
+  const extraH = 52;
+  const extraW = 40;
   const out = document.createElement('canvas');
   out.width = cc.width + extraW;
   out.height = cc.height + 22 + extraH;
   const ctx = out.getContext('2d');
   ctx.fillStyle = 'white';
   ctx.fillRect(0, 0, out.width, out.height);
-  const lh = addHeader(ctx, out.width, 'Drone Route — Terrain Profile');
+  const lh = addHeader(ctx, out.width, getRouteName() + ' — Profile');
   ctx.drawImage(cc, 0, lh);
   drawProfileLegendAndMetrics(ctx, out.width, lh + cc.height);
-  saveBlobAsPNG(out, 'drone-profile-' + timestamp() + '.png');
-  setStatus('Profile PNG saved.');
+  const base = sanitiseFilename(getRouteName()) + ' - profile';
+  const filename = resolveFilename(base, 'png');
+  await savePngFile(out, 'Images', '', filename);
+  setStatus('Profile PNG saved as ' + filename);
 };
 
 document.getElementById('btn-png-both').onclick = async () => {
@@ -1055,27 +1247,25 @@ document.getElementById('btn-png-both').onclick = async () => {
   setStatus('Rendering combined PNG...');
   const mc = await captureMap();
   const cc = document.getElementById('profile-chart');
-  const labelH = 22;
-  // Side by side: map left, chart right, both scaled to same height
-  const h = mc.height; // use map height as the common row height
+  const h = mc.height;
   const scale = h / cc.height;
-  const ccW = Math.round(cc.width * scale); // chart width scaled to match
+  const ccW = Math.round(cc.width * scale);
   const totalW = mc.width + ccW;
   const out = document.createElement('canvas');
   out.width = totalW;
-  out.height = labelH + h;
+  out.height = 22 + h;
   const ctx = out.getContext('2d');
   ctx.fillStyle = '#f5f5f3';
   ctx.fillRect(0, 0, totalW, out.height);
-  const lh = addHeader(ctx, totalW, 'Drone Route Terrain Planner');
-  // Map on the left
+  const lh = addHeader(ctx, totalW, getRouteName());
   ctx.drawImage(mc, 0, lh);
-  // Chart on the right, scaled to same height as map
   ctx.fillStyle = 'white';
   ctx.fillRect(mc.width, lh, ccW, h);
   ctx.drawImage(cc, 0, 0, cc.width, cc.height, mc.width, lh, ccW, h);
-  saveBlobAsPNG(out, 'drone-route-' + timestamp() + '.png');
-  setStatus('Combined PNG saved.');
+  const base = sanitiseFilename(getRouteName()) + ' - both';
+  const filename = resolveFilename(base, 'png');
+  await savePngFile(out, 'Images', '', filename);
+  setStatus('Combined PNG saved as ' + filename);
 };
 
 // ── FPV terrain texture settings ───────────────────────────────────────────
@@ -1144,7 +1334,10 @@ function openFpvWindow() {
     osmZoom:     getFpvOsmZoom(),
     altMode:     'ruleb',
     ruleB:       dtm.length ? ruleBarcCeiling(dtm, dx) : null,
+    routeName:   getRouteName(),
   };
+  // Expose _baseDir on window so FPV can access it via window.opener._baseDir
+  window._baseDir = _baseDir;
 
   // Always close any existing popup first — reusing via location.href change
   // can leave the popup with a broken/stale window.opener reference, causing
@@ -1260,6 +1453,29 @@ document.getElementById('btn-layout').onclick = function() {
   setTimeout(() => { map.invalidateSize(); }, 50);
   if (profileChart) profileChart.resize();
 };
+
+// ── FPV remote commands ────────────────────────────────────────────────────
+// Send a command object to the open FPV popup via window._fpvCmd.
+// fpv.html polls window._fpvCmd on each animation frame and clears it after
+// handling.  Safe to call even if FPV is not open — the popup check guards it.
+
+function fpvSendCmd(cmd) {
+  if (_fpvPopup && !_fpvPopup.closed) {
+    _fpvPopup._fpvCmd = cmd;
+  }
+}
+
+// Jump to the sample index for waypoint wpIndex, take a still there.
+function fpvGoAndStill(wpIndex) {
+  fpvSendCmd({ type: 'still', wpIndex });
+  setStatus('FPV: taking still at WP' + (wpIndex + 1) + '…');
+}
+
+// Jump to waypoint and start/stop recording.
+function fpvGoAndRecord(wpIndex, action) {
+  fpvSendCmd({ type: 'record', wpIndex, action });
+  setStatus('FPV: ' + (action === 'start' ? 'starting' : 'stopping') + ' recording at WP' + (wpIndex + 1) + '…');
+}
 
 // ── Context menu ─────────────────────────────────────────────────────────────
 // Shared right-click menu for map and profile chart.
@@ -1378,6 +1594,24 @@ function showWaypointMenu(pageX, pageY, wpIndex, clickedLatlng) {
       setStatus('Waypoint ' + n + ' deleted.');
     }
   });
+
+  // FPV actions — only shown when the FPV window is open
+  const fpv = _fpvPopup && !_fpvPopup.closed ? _fpvPopup : null;
+  if (fpv) {
+    items.push({ type: 'sep' });
+    items.push({
+      type: 'item', icon: '📷', label: 'FPV: Take still at WP' + n,
+      action: () => fpvGoAndStill(wpIndex)
+    });
+    items.push({
+      type: 'item', icon: '⏺', label: 'FPV: Start recording at WP' + n,
+      action: () => fpvGoAndRecord(wpIndex, 'start')
+    });
+    items.push({
+      type: 'item', icon: '⏹', label: 'FPV: Stop recording at WP' + n,
+      action: () => fpvGoAndRecord(wpIndex, 'stop')
+    });
+  }
   showCtxMenu(pageX, pageY, items);
 }
 

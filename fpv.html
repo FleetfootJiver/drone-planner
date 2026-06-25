@@ -1,4 +1,4 @@
-<!-- FPV View v2.12 -->
+<!-- FPV View v2.17 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -53,6 +53,14 @@ canvas { display:block; width:100%!important; height:100%!important; }
   position:absolute; left:0; right:0; height:4px;
   background:#333; border-radius:2px; pointer-events:none;
 }
+#btn-still {
+  background:#2a2a2a; border:1px solid #444; color:#ddd;
+  border-radius:5px; padding:5px 10px; cursor:pointer;
+  font-size:14px; line-height:1; transition:background 0.15s;
+  white-space:nowrap;
+}
+#btn-still:hover { background:#3a3a3a; }
+#btn-still.flash { background:#1a6fa8; color:#fff; }
 #btn-record {
   background:#2a2a2a; border:1px solid #444; color:#ddd;
   border-radius:5px; padding:5px 10px; cursor:pointer;
@@ -176,6 +184,7 @@ canvas { display:block; width:100%!important; height:100%!important; }
   </div>
   <span id="time-label">0 m / 0 m</span>
   <span id="agl-label">— m AGL</span>
+  <button id="btn-still" title="Capture still frame">&#x1F4F8; Still</button>
   <button id="btn-record" title="Arm recording">&#x23FA; Record</button>
   <span id="rec-status"></span>
   <button id="fpv-settings-btn" title="FPV settings">&#x2699;&#xFE0F;</button>
@@ -194,6 +203,73 @@ const grid     = data.grid;
 const profile  = data.profile;
 const wps      = data.waypoints;
 document.getElementById('load-msg').textContent = 'Data OK: ' + grid.width + 'x' + grid.height + ', loading Three.js…';
+
+// Route name (from opener, used for filenames)
+const fpvRouteName = data.routeName || 'Unnamed route';
+
+function fpvSanitise(s) {
+  return s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'route';
+}
+
+// Distance string: zero-padded to 4 digits (metres)
+function distStr(m) { return String(Math.round(m)).padStart(4, '0'); }
+
+// Save a canvas as PNG — to the opener's output folder if available, else download
+async function saveFpvPng(canvas, subFolder, routeSubDir, filename) {
+  return new Promise(resolve => {
+    canvas.toBlob(async blob => {
+      let saved = false;
+      try {
+        const opener = window.opener;
+        if (opener && opener._baseDir) {
+          const base = await opener._baseDir.getDirectoryHandle(subFolder, { create: true });
+          const sub  = routeSubDir
+            ? await base.getDirectoryHandle(routeSubDir, { create: true })
+            : base;
+          const fh = await sub.getFileHandle(filename, { create: true });
+          const ws = await fh.createWritable();
+          await ws.write(blob);
+          await ws.close();
+          saved = true;
+        }
+      } catch(e) { console.warn('saveFpvPng folder write failed:', e); }
+      if (!saved) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      }
+      resolve(saved);
+    }, 'image/png');
+  });
+}
+
+async function saveFpvVideo(blob, subFolder, routeSubDir, filename) {
+  let saved = false;
+  try {
+    const opener = window.opener;
+    if (opener && opener._baseDir) {
+      const base = await opener._baseDir.getDirectoryHandle(subFolder, { create: true });
+      const sub  = routeSubDir
+        ? await base.getDirectoryHandle(routeSubDir, { create: true })
+        : base;
+      const fh = await sub.getFileHandle(filename, { create: true });
+      const ws = await fh.createWritable();
+      await ws.write(blob);
+      await ws.close();
+      saved = true;
+    }
+  } catch(e) { console.warn('saveFpvVideo folder write failed:', e); }
+  if (!saved) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+  return saved;
+}
 
 let terrainMode = data.terrainMode || 'osm';
 let osmZoom     = data.osmZoom     || 17;
@@ -1125,11 +1201,17 @@ document.querySelectorAll('input[name="fpv-speed"]').forEach(r =>
 );
 
 // ── Recording ─────────────────────────────────────────────────────────────────
-let mediaRecorder = null;
-let recChunks     = [];
-let recArmed      = false;
-let recStartTime  = null;
-let recTimer      = null;
+let mediaRecorder  = null;
+let recChunks      = [];
+let recArmed       = false;
+let recStartTime   = null;
+let recTimer       = null;
+let recStartDistM  = 0;   // route distance (m) when recording began
+
+function currentDistM() {
+  const i = Math.max(0, Math.min(Math.round(curIdx), nSamples - 1));
+  return Math.round(profile.distances_m[i]);
+}
 
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
@@ -1140,7 +1222,7 @@ function stopRecording() {
 function startRecordingIfArmed() {
   if (!recArmed || (mediaRecorder && mediaRecorder.state === 'recording')) return;
   const btnRec = document.getElementById('btn-record');
-  // Use VP9 if supported, fall back to default codec
+  recStartDistM = currentDistM();
   const qualityEl = document.querySelector('input[name="fpv-quality"]:checked');
   const bitrate   = qualityEl ? parseInt(qualityEl.value) : 8000000;
   const mimeType  = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
@@ -1150,22 +1232,20 @@ function startRecordingIfArmed() {
   recChunks = [];
   mediaRecorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recChunks.push(e.data); };
-  mediaRecorder.onstop = () => {
+  mediaRecorder.onstop = async () => {
     clearInterval(recTimer);
     btnRec.className = 'armed';
     btnRec.textContent = '⏺ Record';
     recStatus.style.display = 'none';
     if (recChunks.length === 0) return;
-    const blob = new Blob(recChunks, { type: mimeType });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url;
-    a.download = 'fpv-flight-' + new Date().toISOString().replace(/[:.]/g,'-').slice(0,19) + '.webm';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    const blob     = new Blob(recChunks, { type: mimeType });
+    const endDist  = currentDistM();
+    const rName    = fpvSanitise(fpvRouteName);
+    const filename = rName + ' - ' + distStr(recStartDistM) + '_' + distStr(endDist) + '.webm';
+    await saveFpvVideo(blob, 'Videos', rName, filename);
     recChunks = [];
   };
-  mediaRecorder.start(1000);   // collect chunks every 1s
+  mediaRecorder.start(1000);
   recStartTime = Date.now();
   btnRec.className = 'recording';
   recStatus.style.display = 'inline';
@@ -1187,6 +1267,55 @@ btnRecord.onclick = () => {
     btnRecord.title = 'Arm recording';
   }
 };
+
+// ── Still capture ─────────────────────────────────────────────────────────────
+async function captureStill() {
+  const wasPlaying = playing;
+  if (wasPlaying) { playing = false; btnPlay.textContent = '▶'; }
+
+  const rName    = fpvSanitise(fpvRouteName);
+  const dist     = currentDistM();
+  const filename = rName + ' - ' + distStr(dist) + 'm.png';
+  await saveFpvPng(canvas, 'Stills', rName, filename);
+
+  const btn = document.getElementById('btn-still');
+  btn.classList.add('flash');
+  setTimeout(() => btn.classList.remove('flash'), 300);
+
+  if (wasPlaying) { playing = true; btnPlay.textContent = '⏸'; animate(); }
+}
+
+document.getElementById('btn-still').onclick = captureStill;
+
+// ── Remote command polling (from main window context menu) ────────────────────
+// index.html sets window._fpvCmd = { type, wpIndex, action } to trigger actions.
+function handleFpvCmd(cmd) {
+  window._fpvCmd = null;   // consume immediately
+
+  // Jump to the waypoint sample index if provided
+  if (cmd.wpIndex !== undefined && wpPathIdx[cmd.wpIndex] !== undefined) {
+    curIdx = wpPathIdx[cmd.wpIndex];
+    positionCamera(Math.round(curIdx));
+    scrubber.value = Math.round(curIdx);
+  }
+
+  if (cmd.type === 'still') {
+    captureStill();
+  } else if (cmd.type === 'record') {
+    if (cmd.action === 'start') {
+      recArmed = true;
+      btnRecord.className = 'armed';
+      startRecordingIfArmed();
+    } else if (cmd.action === 'stop') {
+      stopRecording();
+      recArmed = false;
+      btnRecord.className = '';
+    }
+  }
+}
+
+setInterval(() => { if (window._fpvCmd) handleFpvCmd(window._fpvCmd); }, 100);
+
 
 // ── Hide loading overlay and start ───────────────────────────────────────────
 if (terrainMode === 'osm') {
