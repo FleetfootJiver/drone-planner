@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.19 -->
+<!-- Drone Route Planner v2.21 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -202,6 +202,12 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
 .ctx-item:hover { background: #f0f6ff; }
 .ctx-item.danger { color: #c94040; }
 .ctx-item.danger:hover { background: #fdf0f0; }
+.ctx-item.disabled {
+  color: #bbb;
+  cursor: default;
+  pointer-events: none;
+}
+.ctx-item.disabled:hover { background: transparent; }
 .ctx-sep {
   height: 1px;
   background: #f0f0f0;
@@ -291,6 +297,17 @@ body { font-family: system-ui, sans-serif; background: #f5f5f3; color: #1a1a1a; 
   </div>
 
   <div class="sg-section">
+    <div class="sg-section-title">Waypoint editing</div>
+    <div class="sg-row">
+      <input type="checkbox" id="sg-autorecalc" checked>
+      <label for="sg-autorecalc">Auto-recalculate affected segments</label>
+    </div>
+    <div style="font-size:10px;color:#aaa;padding:2px 2px 0 22px;line-height:1.5;">
+      When off, altered segments use bridged terrain until Calculate is pressed.
+    </div>
+  </div>
+
+  <div class="sg-section">
     <div class="sg-section-title">Keepalive</div>
     <div class="sg-row"><input type="radio" name="sg-ka" id="sg-ka-off" value="0" checked><label for="sg-ka-off">Off</label></div>
     <div class="sg-row"><input type="radio" name="sg-ka" id="sg-ka-5"  value="5"><label for="sg-ka-5">Every 5 minutes</label></div>
@@ -330,7 +347,272 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 let waypoints = [], markers = [], routeLine = null, profileChart = null;
 let adding = true;
 
-// ── Route name ──────────────────────────────────────────────────────────────
+// ── Preferences (localStorage) ───────────────────────────────────────────────
+const PREFS_KEY = 'droneplannerPrefs';
+
+function defaultPrefs() {
+  return {
+    autoRecalc:   true,
+    layout:       'portrait',
+    ruleA:        false,
+    ruleBarc:     true,
+    ruleC:        false,
+    fmt:          'csv',
+    ka:           0,
+    kamax:        30,
+    fpv: {
+      terrainMode: 'osm',
+      osmZoom:     17,
+      altMode:     'ruleb',
+      quality:     8000000,
+      speed:       20,
+    }
+  };
+}
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return defaultPrefs();
+    return Object.assign(defaultPrefs(), JSON.parse(raw));
+  } catch(e) { return defaultPrefs(); }
+}
+
+function savePrefs() {
+  try {
+    const existing = loadPrefs();   // preserve fpv sub-object written by fpv.html
+    const p = Object.assign(existing, {
+      autoRecalc: document.getElementById('sg-autorecalc').checked,
+      layout:     layoutModes[layoutIdx] || 'portrait',
+      ruleA:      document.getElementById('sg-ruleA').checked,
+      ruleBarc:   document.getElementById('sg-ruleBarc').checked,
+      ruleC:      document.getElementById('sg-ruleC').checked,
+      fmt:        getFileFmt(),
+      ka:         parseInt(document.querySelector('input[name="sg-ka"]:checked').value, 10),
+      kamax:      parseInt(document.querySelector('input[name="sg-kamax"]:checked').value, 10),
+    });
+    localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+  } catch(e) { /* localStorage may be unavailable in some contexts */ }
+}
+
+// Apply saved prefs to the UI — called once on load after DOM is ready.
+// layoutIdx must already be declared; called at end of script after all inits.
+function applyPrefs(p) {
+  // Layout
+  const li = layoutModes.indexOf(p.layout);
+  if (li >= 0 && li !== layoutIdx) {
+    document.getElementById('main-layout').classList.remove(layoutModes[layoutIdx]);
+    layoutIdx = li;
+    document.getElementById('main-layout').classList.add(layoutModes[layoutIdx]);
+  }
+  // Rules
+  document.getElementById('sg-ruleA').checked    = p.ruleA;
+  document.getElementById('sg-ruleBarc').checked = p.ruleBarc;
+  document.getElementById('sg-ruleC').checked    = p.ruleC;
+  showRuleA    = p.ruleA;
+  showRuleBarc = p.ruleBarc;
+  showRuleC    = p.ruleC;
+  applyRuleVisibility();
+  // Format
+  const fmtEl = document.getElementById('sg-fmt-' + p.fmt);
+  if (fmtEl) fmtEl.checked = true;
+  // Keepalive
+  const kaEl = document.getElementById('sg-ka-' + (p.ka === 0 ? 'off' : p.ka));
+  if (kaEl) { kaEl.checked = true; }
+  const kamaxEl = document.getElementById('sg-kamax-' + p.kamax);
+  if (kamaxEl) { kamaxEl.checked = true; }
+  updateKeepalive();
+  // Auto-recalc
+  document.getElementById('sg-autorecalc').checked = p.autoRecalc;
+}
+
+// ── Bridged-terrain state ─────────────────────────────────────────────────────
+// Tracks which segments have had their terrain replaced with linear bridges.
+// Key: segment index i (the segment WP[i] → WP[i+1]).
+// Value: true if bridged (needs recalculation before FPV / save).
+const _bridgedSegs = new Set();
+
+function hasBridgedSegments() { return _bridgedSegs.size > 0; }
+
+// Compute cumulative sample offsets for each waypoint in _lastProfile.
+// Returns array of length waypoints.length with sample index of each WP.
+function wpSampleOffsets() {
+  if (!_lastProfile || waypoints.length < 2) return [];
+  const offsets = [0];
+  for (let i = 1; i < waypoints.length; i++) {
+    const segLen = haversine(waypoints[i-1], waypoints[i]);
+    offsets.push(offsets[i-1] + Math.round(segLen));
+  }
+  return offsets;
+}
+
+// Apply a linear bridge to segment segIdx in _lastProfile.
+// Replaces the DTM/DSM samples for that segment with linear interpolation
+// between the endpoint values.  Distances and point count are unchanged.
+function bridgeSegment(segIdx) {
+  if (!_lastProfile || segIdx < 0 || segIdx >= waypoints.length - 1) return;
+  const offsets = wpSampleOffsets();
+  const startI  = offsets[segIdx];
+  const endI    = offsets[segIdx + 1];
+  if (endI <= startI) return;
+
+  const dtm = _lastProfile.dtm;
+  const dsm = _lastProfile.dsm;
+  const dtmA = dtm[startI] ?? 0,  dtmB = dtm[endI] ?? 0;
+  const dsmA = dsm[startI] ?? 0,  dsmB = dsm[endI] ?? 0;
+  const n = endI - startI;
+
+  for (let j = 0; j <= n; j++) {
+    const t = j / n;
+    dtm[startI + j] = dtmA + t * (dtmB - dtmA);
+    dsm[startI + j] = dsmA + t * (dsmB - dsmA);
+  }
+  _bridgedSegs.add(segIdx);
+}
+
+// Called by waypointLinesPlugin afterDraw — returns array of
+// { x0, x1 } distance ranges (in metres) for bridged segments.
+function bridgedDistanceRanges() {
+  if (!_lastProfile || !_bridgedSegs.size) return [];
+  const offsets = wpSampleOffsets();
+  const dists   = _lastProfile.distances_m;
+  return [..._bridgedSegs].map(si => ({
+    x0: dists[offsets[si]]     ?? 0,
+    x1: dists[offsets[si + 1]] ?? dists[dists.length - 1],
+  }));
+}
+
+// Redraw the profile chart from the current _lastProfile data (after bridging).
+function redrawProfile() {
+  if (!profileChart || !_lastProfile) return;
+  const p       = _lastProfile;
+  const distances = p.distances_m.map(d => Math.round(d));
+  const dtm     = p.dtm;
+  const dsm     = p.dsm;
+  const dx      = p.total_length_m / (p.points - 1);
+  const ruleA   = ruleACeiling(dtm.map(v => v ?? 0));
+  const ruleBarc = ruleBarcCeiling(dtm.map(v => v ?? 0), dx);
+  const ruleC   = ruleCCeiling(dtm.map(v => v ?? 0));
+
+  // Update chart data in-place (avoids destroy/recreate flicker)
+  const ds = profileChart.data.datasets;
+  profileChart.data.labels = distances;
+  ds[0].data = dtm;
+  ds[1].data = dsm;
+  ds[2].data = ruleA;
+  ds[3].data = ruleBarc;
+  ds[4].data = ruleC;
+
+  // Update info-card values — use '?' for terrain-derived values when bridged
+  if (hasBridgedSegments()) {
+    document.getElementById('ic-ruleA').textContent = '?';
+    document.getElementById('ic-ruleB').textContent = '?';
+    document.getElementById('ic-maxterrain').textContent = '?';
+    setStatus('Waypoint moved — bridged terrain shown (⚠ Recalculate for accurate values).');
+  } else {
+    document.getElementById('ic-ruleA').textContent = Math.round(Math.min(...ruleA));
+    document.getElementById('ic-ruleB').textContent = Math.round(Math.min(...ruleBarc));
+    document.getElementById('ic-maxterrain').textContent =
+      Math.round(Math.max(...dtm.filter(v => v !== null)));
+  }
+  document.getElementById('ic-dist').textContent = Math.round(totalRouteLength(waypoints));
+
+  // Update waypointLines plugin opts with fresh data
+  profileChart.options.plugins.waypointLines.waypoints  = waypoints;
+  profileChart.options.plugins.waypointLines.distances  = distances;
+  profileChart.options.plugins.waypointLines.ruleA      = ruleA;
+  profileChart.options.plugins.waypointLines.ruleBarc   = ruleBarc;
+  profileChart.options.plugins.waypointLines.ruleC      = ruleC;
+  profileChart.options.plugins.waypointLines.dsm        = dsm;
+
+  profileChart.update('none');   // no animation for immediate feedback
+}
+
+// Partial recalculation: fetch real terrain for one segment (two waypoints)
+// and splice back into _lastProfile.
+async function partialRecalc(segIdx) {
+  if (segIdx < 0 || segIdx >= waypoints.length - 1) return;
+  const segWps = [waypoints[segIdx], waypoints[segIdx + 1]];
+  setStatus('Updating segment ' + (segIdx + 1) + '→' + (segIdx + 2) + '…');
+  let subProfile;
+  try {
+    subProfile = await fetchProfile(segWps, null);
+  } catch(e) {
+    setStatus('Partial recalc failed: ' + e.message + ' — press Calculate for full update.');
+    return;
+  }
+
+  // Splice sub-profile into _lastProfile at the right sample positions.
+  const offsets = wpSampleOffsets();
+  const startI  = offsets[segIdx];
+  const endI    = offsets[segIdx + 1];
+
+  // subProfile has its own distances; we only take dtm/dsm/rule_b values.
+  const subLen = subProfile.dtm.length;
+  const tgtLen = endI - startI + 1;
+
+  // Resample sub-profile to match existing sample count if lengths differ
+  // (can happen due to rounding; typically off by at most 1 sample).
+  function resample(arr, fromLen, toLen) {
+    if (fromLen === toLen) return arr;
+    const out = [];
+    for (let i = 0; i < toLen; i++) {
+      const t = i / (toLen - 1) * (fromLen - 1);
+      const lo = Math.floor(t), hi = Math.min(lo + 1, fromLen - 1);
+      const frac = t - lo;
+      const v0 = arr[lo], v1 = arr[hi];
+      out.push((v0 === null && v1 === null) ? null :
+               (v0 ?? v1) + frac * ((v1 ?? v0) - (v0 ?? v1)));
+    }
+    return out;
+  }
+
+  const newDtm = resample(subProfile.dtm,    subLen, tgtLen);
+  const newDsm = resample(subProfile.dsm,    subLen, tgtLen);
+  const newRB  = resample(subProfile.rule_b, subLen, tgtLen);
+
+  _lastProfile.dtm.splice(startI,    tgtLen, ...newDtm);
+  _lastProfile.dsm.splice(startI,    tgtLen, ...newDsm);
+  _lastProfile.rule_b.splice(startI, tgtLen, ...newRB);
+
+  _bridgedSegs.delete(segIdx);
+  redrawProfile();
+  setStatus('Segment ' + (segIdx + 1) + '→' + (segIdx + 2) + ' updated.');
+}
+
+// Ensure all bridged segments have real terrain — used before FPV/Save.
+async function ensureFullProfile() {
+  if (!hasBridgedSegments()) return true;
+  setStatus('Updating bridged segments before proceeding…');
+  const segs = [..._bridgedSegs];  // copy since set mutates during iteration
+  for (const si of segs) {
+    await partialRecalc(si);
+  }
+  return !hasBridgedSegments();
+}
+
+// Called when a single waypoint is moved or inserted.
+// segIndices: array of segment indices whose terrain has been invalidated.
+async function onWaypointAltered(segIndices) {
+  // Always recalculate distances and redraw route line immediately.
+  // If we have a profile, bridge or recalc the affected segments.
+  if (!_lastProfile) return;
+
+  const autoRecalc = document.getElementById('sg-autorecalc').checked;
+
+  if (autoRecalc) {
+    for (const si of segIndices) {
+      await partialRecalc(si);
+    }
+  } else {
+    for (const si of segIndices) {
+      bridgeSegment(si);
+    }
+    redrawProfile();
+  }
+}
+
+
 let routeName = '';   // current route name (set from input box or filename on load)
 
 function getRouteName() {
@@ -619,7 +901,13 @@ function updateMarkers() {
       const old   = waypoints[i];
       waypoints[i] = Object.assign(L.latLng(newll.lat, newll.lng),
         { altitude: old.altitude, still: old.still, video: old.video });
-      invalidateTerrainGrid(); updateRoute();
+      invalidateTerrainGrid();
+      updateRoute();
+      // Segments before and after this waypoint may be affected
+      const segs = [];
+      if (i > 0) segs.push(i - 1);
+      if (i < waypoints.length - 1) segs.push(i);
+      onWaypointAltered(segs);
     });
     m.on('dblclick', () => { waypoints.splice(i,1); invalidateTerrainGrid(); updateMarkers(); updateRoute(); });
     m.bindTooltip('WP' + (i+1) + '  ' + wp.lat.toFixed(5) + ', ' + wp.lng.toFixed(5)
@@ -679,6 +967,7 @@ document.getElementById('btn-clear').onclick = () => {
   document.getElementById('ic-wps').textContent = '0';
   document.getElementById('wp-count').textContent = '0 waypoints';
   cachedBbox = null;
+  _bridgedSegs.clear();
   invalidateTerrainGrid();
   setFpvReady(false);
   setStatus('Cleared. Click the map to place new waypoints.');
@@ -714,9 +1003,9 @@ function applyRuleVisibility() {
   profileChart.update();
 }
 
-document.getElementById('sg-ruleA').onchange    = function() { showRuleA    = this.checked; applyRuleVisibility(); };
-document.getElementById('sg-ruleBarc').onchange = function() { showRuleBarc = this.checked; applyRuleVisibility(); };
-document.getElementById('sg-ruleC').onchange    = function() { showRuleC    = this.checked; applyRuleVisibility(); };
+document.getElementById('sg-ruleA').onchange    = function() { showRuleA    = this.checked; applyRuleVisibility(); savePrefs(); };
+document.getElementById('sg-ruleBarc').onchange = function() { showRuleBarc = this.checked; applyRuleVisibility(); savePrefs(); };
+document.getElementById('sg-ruleC').onchange    = function() { showRuleC    = this.checked; applyRuleVisibility(); savePrefs(); };
 applyRuleVisibility();   // sync legend with default rule selection on load
 
 document.getElementById('btn-choose-folder').onclick = async (e) => {
@@ -728,6 +1017,9 @@ document.getElementById('btn-choose-folder').onclick = async (e) => {
 function getFileFmt() {
   return document.querySelector('input[name="sg-fmt"]:checked').value;
 }
+document.querySelectorAll('input[name="sg-fmt"]').forEach(r =>
+  r.addEventListener('change', savePrefs));
+document.getElementById('sg-autorecalc').addEventListener('change', savePrefs);
 
 // ── Keepalive ───────────────────────────────────────────────────────────────
 let _kaIntervalId  = null;
@@ -763,9 +1055,9 @@ function updateKeepalive() {
 }
 
 document.querySelectorAll('input[name="sg-ka"]').forEach(r =>
-  r.addEventListener('change', updateKeepalive));
+  r.addEventListener('change', () => { updateKeepalive(); savePrefs(); }));
 document.querySelectorAll('input[name="sg-kamax"]').forEach(r =>
-  r.addEventListener('change', updateKeepalive));
+  r.addEventListener('change', () => { updateKeepalive(); savePrefs(); }));
 
 
 
@@ -843,7 +1135,11 @@ function saveGeoJSON() {
   setStatus('Saved ' + waypoints.length + ' waypoints as ' + filename);
 }
 
-document.getElementById('btn-save').onclick = () => {
+document.getElementById('btn-save').onclick = async () => {
+  if (hasBridgedSegments()) {
+    setStatus('Updating bridged segments before saving…');
+    await ensureFullProfile();
+  }
   const fmt = getFileFmt();
   if (fmt === 'csv') saveCSV();
   else if (fmt === 'kml') saveKML();
@@ -1119,6 +1415,7 @@ async function runProfile() {
   const yMax = Math.ceil(Math.max(...allVals)/10)*10 + 20;
 
   _lastProfile = profile;
+  _bridgedSegs.clear();   // full recalc — no bridged segments remain
 
   // Invalidate terrain grid if it no longer adequately covers the new route.
   // This catches route changes (drag, load) that didn't trigger invalidation,
@@ -1374,6 +1671,13 @@ async function fetchTerrainGrid() {
 document.getElementById('btn-fpv').onclick = async () => {
   const btn = document.getElementById('btn-fpv');
 
+  // If bridged segments exist, complete the terrain data now
+  if (hasBridgedSegments()) {
+    setStatus('Updating bridged segments before opening FPV…');
+    const ok = await ensureFullProfile();
+    if (!ok) { setStatus('Could not complete terrain update — try Calculate first.'); return; }
+  }
+
   // Auto-recalculate profile if waypoints have changed since last calculation
   if (!_lastProfile) {
     setStatus('Calculating profile for FPV view…');
@@ -1455,6 +1759,42 @@ const waypointLinesPlugin = {
     const yAxis = chart.scales.y;
     const wps = opts.waypoints;
 
+    // ── Grey overlay for bridged segments ──────────────────────────────────
+    const bridgedRanges = bridgedDistanceRanges();
+    if (bridgedRanges.length) {
+      const distArr = opts.distances;
+      const yTop = yAxis.top;
+      const yBot = yAxis.bottom;
+      ctx2.save();
+      ctx2.fillStyle = 'rgba(180,180,180,0.22)';
+      for (const { x0, x1 } of bridgedRanges) {
+        // Find pixel positions for the distance range
+        let i0 = 0, i1 = distArr.length - 1;
+        for (let i = 0; i < distArr.length; i++) {
+          if (distArr[i] <= x0) i0 = i;
+          if (distArr[i] <= x1) i1 = i;
+        }
+        const px0 = xAxis.getPixelForValue(i0);
+        const px1 = xAxis.getPixelForValue(i1);
+        ctx2.fillRect(px0, yTop, px1 - px0, yBot - yTop);
+      }
+      // Label
+      ctx2.fillStyle = 'rgba(120,120,120,0.75)';
+      ctx2.font = 'italic 10px system-ui, sans-serif';
+      ctx2.textAlign = 'center';
+      ctx2.textBaseline = 'top';
+      for (const { x0, x1 } of bridgedRanges) {
+        let i0 = 0, i1 = distArr.length - 1;
+        for (let i = 0; i < distArr.length; i++) {
+          if (distArr[i] <= x0) i0 = i;
+          if (distArr[i] <= x1) i1 = i;
+        }
+        const midPx = (xAxis.getPixelForValue(i0) + xAxis.getPixelForValue(i1)) / 2;
+        ctx2.fillText('⚠ recalc needed', midPx, yTop + 4);
+      }
+      ctx2.restore();
+    }
+
     // Compute cumulative distances to each waypoint
     let cumDist = 0;
     const wpDists = [0];
@@ -1534,6 +1874,7 @@ document.getElementById('btn-layout').onclick = function() {
   this.textContent = layoutLabels[layoutIdx];
   setTimeout(() => { map.invalidateSize(); }, 50);
   if (profileChart) profileChart.resize();
+  savePrefs();
 };
 
 // ── Context menu ─────────────────────────────────────────────────────────────
@@ -1558,7 +1899,8 @@ const ctxMenuEl = document.getElementById('ctx-menu');
 let pendingInsert = null;
 
 function showCtxMenu(pageX, pageY, items) {
-  // items: array of { type:'header'|'item'|'sep', label?, icon?, action?, danger? }
+  // items: { type:'header'|'item'|'sep', label?, icon?, action?, danger?, disabled? }
+  // disabled items render greyed-out and are not clickable.
   ctxMenuEl.innerHTML = '';
   items.forEach(it => {
     if (it.type === 'header') {
@@ -1572,9 +1914,13 @@ function showCtxMenu(pageX, pageY, items) {
       ctxMenuEl.appendChild(d);
     } else {
       const d = document.createElement('div');
-      d.className = 'ctx-item' + (it.danger ? ' danger' : '');
+      d.className = 'ctx-item'
+        + (it.danger    ? ' danger'   : '')
+        + (it.disabled  ? ' disabled' : '');
       d.innerHTML = (it.icon ? '<span>' + it.icon + '</span>' : '') + it.label;
-      d.addEventListener('click', () => { hideCtxMenu(); it.action(); });
+      if (!it.disabled) {
+        d.addEventListener('click', () => { hideCtxMenu(); it.action(); });
+      }
       ctxMenuEl.appendChild(d);
     }
   });
@@ -1671,20 +2017,26 @@ function showWaypointMenu(pageX, pageY, wpIndex, clickedLatlng) {
     }
   });
 
-  // Video: three options, current one marked
+  // Video: three options, current one marked.
+  // On the last waypoint, "stop" is redundant (FPV stops automatically at route end)
+  // so it is shown greyed out rather than hidden.
+  const isLastWp = wpIndex === waypoints.length - 1;
   const videoOpts = [
     { val: 'no_change', icon: '—', label: 'Video: no change' },
     { val: 'start',     icon: '⏺', label: 'Video: start recording' },
-    { val: 'stop',      icon: '⏹', label: 'Video: stop recording'  },
+    { val: 'stop',      icon: '⏹', label: 'Video: stop recording'
+                      + (isLastWp ? ' (auto at end)' : '') },
   ];
   videoOpts.forEach(opt => {
-    const active = wp.video === opt.val;
+    const active    = wp.video === opt.val;
+    const isDisabled = opt.val === 'stop' && isLastWp;
     items.push({
       type: 'item',
       icon: active ? '✓' : opt.icon,
       label: opt.label + (active ? ' ✓' : ''),
+      disabled: isDisabled,
       action: () => {
-        if (active) return;   // already set — no change needed
+        if (active) return;
         wp.video = opt.val;
         refreshMarkerAt(wpIndex);
         setStatus('WP' + n + ' video set to ' + opt.val + '.');
@@ -1806,10 +2158,16 @@ map.on('click', e => {
   const { mode, index } = pendingInsert;
   pendingInsert = null;
   const insertAt = mode === 'before' ? index : index + 1;
-  waypoints.splice(insertAt, 0, e.latlng);
+  waypoints.splice(insertAt, 0, Object.assign(L.latLng(e.latlng.lat, e.latlng.lng),
+    { altitude: null, still: false, video: 'no_change' }));
   invalidateTerrainGrid();
   updateMarkers();
   updateRoute();
+  // The two new segments on either side of the inserted waypoint are invalidated
+  const segs = [];
+  if (insertAt > 0) segs.push(insertAt - 1);
+  if (insertAt < waypoints.length - 1) segs.push(insertAt);
+  onWaypointAltered(segs);
   const n = insertAt + 1;
   setStatus('New waypoint WP' + n + ' inserted. Drag to reposition, or press Calculate profile.');
 });
@@ -1888,6 +2246,17 @@ document.getElementById('profile-chart').addEventListener('contextmenu', e => {
     }
   }
 });
+
+// ── Apply saved preferences on load ────────────────────────────────────────
+(function() {
+  const p = loadPrefs();
+  applyPrefs(p);
+  // First-visit notice (only shown once, stored in prefs existence)
+  const isFirstVisit = !localStorage.getItem(PREFS_KEY);
+  if (isFirstVisit) {
+    setStatus('Welcome — your settings are saved locally in this browser.');
+  }
+})();
 
 });</script>
 

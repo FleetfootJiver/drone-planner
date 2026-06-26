@@ -1,4 +1,4 @@
-<!-- FPV View v2.19 -->
+<!-- FPV View v2.21 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1057,21 +1057,77 @@ async function rebuildTexture() {
   }
 }
 
-// Sync initial radio state from passed terrainMode/osmZoom
+// ── FPV preferences (localStorage, same key as main page) ───────────────────
+const FPV_PREFS_KEY = 'droneplannerPrefs';
+
+function saveFpvPrefs() {
+  try {
+    const raw = localStorage.getItem(FPV_PREFS_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    all.fpv = {
+      terrainMode: document.querySelector('input[name="fpv-terrain"]:checked')?.value || 'osm',
+      osmZoom:     parseInt(document.querySelector('input[name="fpv-osmzoom"]:checked')?.value || '17', 10),
+      altMode:     document.querySelector('input[name="fpv-alt"]:checked')?.value || 'ruleb',
+      quality:     parseInt(document.querySelector('input[name="fpv-quality"]:checked')?.value || '8000000', 10),
+      speed:       parseInt(document.querySelector('input[name="fpv-speed"]:checked')?.value || '20', 10),
+    };
+    localStorage.setItem(FPV_PREFS_KEY, JSON.stringify(all));
+  } catch(e) {}
+}
+
+function applyFpvPrefs() {
+  try {
+    const raw = localStorage.getItem(FPV_PREFS_KEY);
+    if (!raw) return;
+    const p = JSON.parse(raw).fpv;
+    if (!p) return;
+    if (p.terrainMode) {
+      const el = document.getElementById('fpv-terrain-' + p.terrainMode);
+      if (el) el.checked = true;
+    }
+    if (p.osmZoom) {
+      const el = document.getElementById('fpv-osmzoom-' + p.osmZoom);
+      if (el) el.checked = true;
+    }
+    if (p.altMode) {
+      const el = document.getElementById('fpv-alt-' + p.altMode);
+      if (el) el.checked = true;
+    }
+    if (p.quality) {
+      // Find the radio whose value matches
+      document.querySelectorAll('input[name="fpv-quality"]').forEach(r => {
+        if (parseInt(r.value, 10) === p.quality) r.checked = true;
+      });
+    }
+    if (p.speed) {
+      document.querySelectorAll('input[name="fpv-speed"]').forEach(r => {
+        if (parseInt(r.value, 10) === p.speed) r.checked = true;
+      });
+    }
+  } catch(e) {}
+}
+
+// Sync initial radio state — first apply saved prefs, then override with
+// any values passed from the opener (terrainMode/osmZoom/altMode from _fpvData
+// take precedence over saved prefs so the main page can still set defaults).
 (function initTerrainRadios() {
+  applyFpvPrefs();  // load saved settings first
+
+  // Then apply opener-supplied values (higher priority)
   const tr = document.getElementById('fpv-terrain-' + terrainMode);
   if (tr) tr.checked = true;
   const zr = document.getElementById('fpv-osmzoom-' + osmZoom);
   if (zr) zr.checked = true;
+
   // Show/hide zoom rows to match initial mode
   document.getElementById('fpv-zoom-rows').classList.toggle('fpv-osm-hidden', terrainMode !== 'osm');
   updateFpvZoomUI();
 })();
 
 document.querySelectorAll('input[name="fpv-terrain"]').forEach(r =>
-  r.addEventListener('change', rebuildTexture));
+  r.addEventListener('change', () => { rebuildTexture(); saveFpvPrefs(); }));
 document.querySelectorAll('input[name="fpv-osmzoom"]').forEach(r =>
-  r.addEventListener('change', () => { if (terrainMode === 'osm') rebuildTexture(); }));
+  r.addEventListener('change', () => { if (terrainMode === 'osm') rebuildTexture(); saveFpvPrefs(); }));
 
 function rebuildPath() {
   for (let s = 0; s < nSamples; s++) {
@@ -1083,6 +1139,7 @@ function rebuildPath() {
 document.querySelectorAll('input[name="fpv-alt"]').forEach(r =>
   r.addEventListener('change', () => {
     rebuildPath();
+    saveFpvPrefs();
   })
 );
 
@@ -1220,7 +1277,10 @@ scrubber.addEventListener('input', () => {
 
 // ── Speed selector ────────────────────────────────────────────────────────────
 document.querySelectorAll('input[name="fpv-speed"]').forEach(r =>
-  r.addEventListener('change', function() { SPEED = parseInt(this.value); })
+  r.addEventListener('change', function() { SPEED = parseInt(this.value); saveFpvPrefs(); })
+);
+document.querySelectorAll('input[name="fpv-quality"]').forEach(r =>
+  r.addEventListener('change', saveFpvPrefs)
 );
 
 // ── In-flight capture accumulator ────────────────────────────────────────────
