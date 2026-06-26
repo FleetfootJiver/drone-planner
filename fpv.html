@@ -1,4 +1,4 @@
-<!-- FPV View v2.17 -->
+<!-- FPV View v2.19 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -190,6 +190,7 @@ canvas { display:block; width:100%!important; height:100%!important; }
   <button id="fpv-settings-btn" title="FPV settings">&#x2699;&#xFE0F;</button>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onload="document.getElementById('load-msg').textContent='Three.js loaded, building terrain…';" onerror="document.getElementById('load-msg').textContent='ERROR: Three.js failed to load'; document.getElementById('load-bar').style.background='#c94040';"></script>
 <script>
 (function() {
@@ -1140,17 +1141,32 @@ document.getElementById('fpv-show-route').addEventListener('change', function() 
 
 positionCamera(0);
 
+// Last waypoint index whose sample we have passed — used to detect crossings.
+let _lastWpPassed = -1;
+
 function animate(ts) {
   requestAnimationFrame(animate);
   if (playing && lastTime !== null) {
-    const dt = (ts - lastTime) / 1000;
+    const dt     = (ts - lastTime) / 1000;
     const endIdx = parseInt(rangeEnd.value);
     curIdx = Math.min(endIdx, curIdx + dt * SPEED);
-    positionCamera(Math.round(curIdx));
-    if (Math.round(curIdx) >= endIdx) {
+    const ci = Math.round(curIdx);
+    positionCamera(ci);
+
+    // Check for waypoint crossings and trigger actions
+    for (let wi = 0; wi < wpPathIdx.length; wi++) {
+      if (wi > _lastWpPassed && ci >= wpPathIdx[wi]) {
+        _lastWpPassed = wi;
+        triggerWpActions(wi);   // async — fire and forget in animate
+      }
+    }
+
+    if (ci >= endIdx) {
       playing = false;
       btnPlay.textContent = '▶';
-      stopRecording();   // auto-stop recording when playback reaches end
+      if (isRecording()) stopRecording(true);   // auto-stop; blob goes to ZIP
+      // Save flight ZIP after a short delay to let MediaRecorder.onstop settle
+      setTimeout(saveFlightZip, 500);
     }
   }
   lastTime = playing ? ts : null;
@@ -1187,7 +1203,14 @@ btnPlay.onclick = () => {
   if (Math.round(curIdx) >= parseInt(rangeEnd.value)) curIdx = parseInt(rangeStart.value);
   playing = !playing;
   btnPlay.textContent = playing ? '⏸' : '▶';
-  if (playing) { lastTime = null; startRecordingIfArmed(); }
+  if (playing) {
+    lastTime = null;
+    // Reset per-play state
+    _lastWpPassed = -1;
+    resetWpTriggers();
+    flightCaptures.length = 0;
+    startRecordingIfArmed();
+  }
 };
 scrubber.addEventListener('input', () => {
   playing = false; btnPlay.textContent = '▶';
@@ -1200,29 +1223,86 @@ document.querySelectorAll('input[name="fpv-speed"]').forEach(r =>
   r.addEventListener('change', function() { SPEED = parseInt(this.value); })
 );
 
+// ── In-flight capture accumulator ────────────────────────────────────────────
+// Stills and videos triggered by waypoint attributes during playback are
+// accumulated here and bundled into a single ZIP when playback ends.
+// The ZIP is only created if at least one item was captured.
+const flightCaptures = [];   // { type: 'still'|'video', filename, blob }
+
+// Session counter for ZIP filenames (shared with index.html resolveFilename
+// but maintained separately here since fpv is a different window).
+const _zipCounters = {};
+function resolveZipName(base) {
+  const key = base + '.zip';
+  if (!(key in _zipCounters)) { _zipCounters[key] = 1; return base + '.zip'; }
+  const n = _zipCounters[key]++;
+  return base + ' - ' + String(n).padStart(3, '0') + '.zip';
+}
+
+async function saveFlightZip() {
+  if (!flightCaptures.length) return;
+  const zip  = new JSZip();
+  for (const c of flightCaptures) zip.file(c.filename, c.blob);
+  const blob    = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  const rName   = fpvSanitise(fpvRouteName);
+  const zipName = resolveZipName(rName);
+  await saveFpvZip(blob, zipName);
+  flightCaptures.length = 0;   // reset for next play
+}
+
+async function saveFpvZip(blob, filename) {
+  let saved = false;
+  try {
+    const opener = window.opener;
+    if (opener && opener._baseDir) {
+      const fh = await opener._baseDir.getFileHandle(filename, { create: true });
+      const ws = await fh.createWritable();
+      await ws.write(blob);
+      await ws.close();
+      saved = true;
+    }
+  } catch(e) { console.warn('saveFpvZip folder write failed:', e); }
+  if (!saved) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+}
+
 // ── Recording ─────────────────────────────────────────────────────────────────
 let mediaRecorder  = null;
 let recChunks      = [];
-let recArmed       = false;
+let recArmed       = false;    // user has armed the Record button manually
 let recStartTime   = null;
 let recTimer       = null;
-let recStartDistM  = 0;   // route distance (m) when recording began
+let recStartDistM  = 0;        // route distance (m) when recording began
+let recIsAuto      = false;    // true when started by a waypoint attribute
 
 function currentDistM() {
   const i = Math.max(0, Math.min(Math.round(curIdx), nSamples - 1));
   return Math.round(profile.distances_m[i]);
 }
 
-function stopRecording() {
+function isRecording() {
+  return mediaRecorder && mediaRecorder.state === 'recording';
+}
+
+// Stop an active recording; blob goes to flightCaptures if autoTriggered,
+// else saved immediately (manual Record button use).
+function stopRecording(autoTriggered) {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder._autoTriggered = autoTriggered;
     mediaRecorder.stop();
   }
 }
 
-function startRecordingIfArmed() {
-  if (!recArmed || (mediaRecorder && mediaRecorder.state === 'recording')) return;
+function startRecording(autoTriggered) {
+  if (isRecording()) return;   // already running — ignore
   const btnRec = document.getElementById('btn-record');
   recStartDistM = currentDistM();
+  recIsAuto = !!autoTriggered;
   const qualityEl = document.querySelector('input[name="fpv-quality"]:checked');
   const bitrate   = qualityEl ? parseInt(qualityEl.value) : 8000000;
   const mimeType  = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
@@ -1234,7 +1314,7 @@ function startRecordingIfArmed() {
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recChunks.push(e.data); };
   mediaRecorder.onstop = async () => {
     clearInterval(recTimer);
-    btnRec.className = 'armed';
+    btnRec.className = recArmed ? 'armed' : '';
     btnRec.textContent = '⏺ Record';
     recStatus.style.display = 'none';
     if (recChunks.length === 0) return;
@@ -1242,7 +1322,13 @@ function startRecordingIfArmed() {
     const endDist  = currentDistM();
     const rName    = fpvSanitise(fpvRouteName);
     const filename = rName + ' - ' + distStr(recStartDistM) + '_' + distStr(endDist) + '.webm';
-    await saveFpvVideo(blob, 'Videos', rName, filename);
+    if (mediaRecorder._autoTriggered) {
+      // Accumulate into flight ZIP
+      flightCaptures.push({ type: 'video', filename, blob });
+    } else {
+      // Manual: save immediately as before
+      await saveFpvVideo(blob, 'Videos', rName, filename);
+    }
     recChunks = [];
   };
   mediaRecorder.start(1000);
@@ -1255,6 +1341,11 @@ function startRecordingIfArmed() {
   }, 1000);
 }
 
+// Called when armed and playback starts (manual Record button path)
+function startRecordingIfArmed() {
+  if (recArmed && !isRecording()) startRecording(false);
+}
+
 const btnRecord = document.getElementById('btn-record');
 btnRecord.onclick = () => {
   recArmed = !recArmed;
@@ -1262,13 +1353,13 @@ btnRecord.onclick = () => {
     btnRecord.className = 'armed';
     btnRecord.title = 'Recording armed — will start when play begins';
   } else {
-    stopRecording();
+    stopRecording(false);
     btnRecord.className = '';
     btnRecord.title = 'Arm recording';
   }
 };
 
-// ── Still capture ─────────────────────────────────────────────────────────────
+// ── Still capture (manual, always saves immediately) ──────────────────────────
 async function captureStill() {
   const wasPlaying = playing;
   if (wasPlaying) { playing = false; btnPlay.textContent = '▶'; }
@@ -1287,34 +1378,48 @@ async function captureStill() {
 
 document.getElementById('btn-still').onclick = captureStill;
 
-// ── Remote command polling (from main window context menu) ────────────────────
-// index.html sets window._fpvCmd = { type, wpIndex, action } to trigger actions.
-function handleFpvCmd(cmd) {
-  window._fpvCmd = null;   // consume immediately
+// ── Auto still capture (waypoint-triggered, goes into flight ZIP) ─────────────
+function captureAutoStill() {
+  return new Promise(resolve => {
+    canvas.toBlob(blob => {
+      const rName    = fpvSanitise(fpvRouteName);
+      const dist     = currentDistM();
+      const filename = rName + ' - ' + distStr(dist) + 'm.png';
+      flightCaptures.push({ type: 'still', filename, blob });
+      resolve();
+    }, 'image/png');
+  });
+}
 
-  // Jump to the waypoint sample index if provided
-  if (cmd.wpIndex !== undefined && wpPathIdx[cmd.wpIndex] !== undefined) {
-    curIdx = wpPathIdx[cmd.wpIndex];
-    positionCamera(Math.round(curIdx));
-    scrubber.value = Math.round(curIdx);
+// ── Waypoint action tracking ──────────────────────────────────────────────────
+// Track which waypoints have been processed this play to avoid re-triggering
+// if the user scrubs back. Reset at each play start.
+const _wpTriggered = new Set();
+
+function resetWpTriggers() { _wpTriggered.clear(); }
+
+// Called in the animate loop when curIdx crosses a waypoint.
+// wpIdx is the 0-based waypoint index.
+async function triggerWpActions(wpIdx) {
+  if (_wpTriggered.has(wpIdx)) return;
+  _wpTriggered.add(wpIdx);
+
+  const wpData = wps[wpIdx];  // from _fpvData
+  if (!wpData) return;
+
+  // Video
+  if (wpData.video === 'start') {
+    if (!isRecording()) startRecording(true);
+  } else if (wpData.video === 'stop') {
+    if (isRecording()) stopRecording(true);
   }
-
-  if (cmd.type === 'still') {
-    captureStill();
-  } else if (cmd.type === 'record') {
-    if (cmd.action === 'start') {
-      recArmed = true;
-      btnRecord.className = 'armed';
-      startRecordingIfArmed();
-    } else if (cmd.action === 'stop') {
-      stopRecording();
-      recArmed = false;
-      btnRecord.className = '';
-    }
+  // Still (use auto-capture so it goes into ZIP)
+  if (wpData.still) {
+    await captureAutoStill();
   }
 }
 
-setInterval(() => { if (window._fpvCmd) handleFpvCmd(window._fpvCmd); }, 100);
+// (remote command polling removed — actions are now data-driven via waypoint attributes)
 
 
 // ── Hide loading overlay and start ───────────────────────────────────────────

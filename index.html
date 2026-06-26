@@ -1,4 +1,4 @@
-<!-- Drone Route Planner v2.17 -->
+<!-- Drone Route Planner v2.19 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -556,21 +556,75 @@ function detectNation(waypoints) {
   return 'England';
 }
 
+// ── Waypoint action attributes ────────────────────────────────────────────────
+// Each L.LatLng in `waypoints` may carry:
+//   .altitude  number|null   — reserved, default null
+//   .still     boolean       — capture still when reached, default false
+//   .video     'start'|'stop'|'no_change'  — default 'no_change'
+//
+// Helper to apply defaults to a waypoint object (in-place, returns it).
+function wpDefaults(wp) {
+  if (wp.altitude === undefined) wp.altitude  = null;
+  if (wp.still    === undefined) wp.still     = false;
+  if (wp.video    === undefined) wp.video     = 'no_change';
+  return wp;
+}
+
+// Badge HTML for action indicator on a marker.
+// Returns '' if no actions set.
+function wpBadgeHtml(wp) {
+  const parts = [];
+  if (wp.still)                    parts.push('📷');
+  if (wp.video === 'start')        parts.push('⏺');
+  else if (wp.video === 'stop')    parts.push('⏹');
+  if (!parts.length) return '';
+  return '<div style="position:absolute;top:-8px;right:-8px;font-size:9px;'
+       + 'background:rgba(0,0,0,0.65);color:white;border-radius:3px;'
+       + 'padding:1px 2px;line-height:1;white-space:nowrap;">'
+       + parts.join('') + '</div>';
+}
+
+function makeWpIcon(index1, wp) {
+  return L.divIcon({
+    className: '',
+    html: '<div style="position:relative;display:inline-block;">'
+        + '<div style="background:#1a6fa8;color:white;border-radius:50%;width:26px;height:26px;'
+        + 'display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;'
+        + 'border:2px solid white;box-shadow:0 1px 5px rgba(0,0,0,0.35)">' + index1 + '</div>'
+        + wpBadgeHtml(wp) + '</div>',
+    iconSize: [26, 26], iconAnchor: [13, 13]
+  });
+}
+
+// Refresh just the icon and tooltip of marker i (no route recalculation).
+function refreshMarkerAt(i) {
+  if (!markers[i]) return;
+  const wp = waypoints[i];
+  markers[i].setIcon(makeWpIcon(i + 1, wp));
+  markers[i].setTooltipContent(
+    'WP' + (i+1) + '  ' + wp.lat.toFixed(5) + ', ' + wp.lng.toFixed(5)
+    + (wp.still ? '  📷' : '')
+    + (wp.video !== 'no_change' ? '  ' + (wp.video === 'start' ? '⏺ rec start' : '⏹ rec stop') : '')
+  );
+}
+
 function updateMarkers() {
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   waypoints.forEach((wp, i) => {
-    const icon = L.divIcon({
-      className: '',
-      html: '<div style="background:#1a6fa8;color:white;border-radius:50%;width:26px;height:26px;'
-          + 'display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;'
-          + 'border:2px solid white;box-shadow:0 1px 5px rgba(0,0,0,0.35)">' + (i+1) + '</div>',
-      iconSize: [26,26], iconAnchor: [13,13]
+    wpDefaults(wp);
+    const m = L.marker([wp.lat, wp.lng], { icon: makeWpIcon(i+1, wp), draggable: true }).addTo(map);
+    m.on('dragend', e => {
+      const newll = e.target.getLatLng();
+      const old   = waypoints[i];
+      waypoints[i] = Object.assign(L.latLng(newll.lat, newll.lng),
+        { altitude: old.altitude, still: old.still, video: old.video });
+      invalidateTerrainGrid(); updateRoute();
     });
-    const m = L.marker([wp.lat, wp.lng], { icon, draggable: true }).addTo(map);
-    m.on('dragend', e => { waypoints[i] = e.target.getLatLng(); invalidateTerrainGrid(); updateRoute(); });
     m.on('dblclick', () => { waypoints.splice(i,1); invalidateTerrainGrid(); updateMarkers(); updateRoute(); });
-    m.bindTooltip('WP' + (i+1) + '  ' + wp.lat.toFixed(5) + ', ' + wp.lng.toFixed(5),
+    m.bindTooltip('WP' + (i+1) + '  ' + wp.lat.toFixed(5) + ', ' + wp.lng.toFixed(5)
+      + (wp.still ? '  📷' : '')
+      + (wp.video !== 'no_change' ? '  ' + (wp.video === 'start' ? '⏺ rec start' : '⏹ rec stop') : ''),
       { direction: 'top', offset: [0,-14] });
     markers.push(m);
   });
@@ -731,8 +785,20 @@ function timestamp() {
 
 function saveCSV() {
   if (!waypoints.length) { setStatus('No waypoints to save.'); return; }
-  const rows = ['index,latitude,longitude'];
-  waypoints.forEach((wp, i) => rows.push((i+1) + ',' + wp.lat.toFixed(7) + ',' + wp.lng.toFixed(7)));
+  const rows = ['index,latitude,longitude,altitude,still,video'];
+  // Encode: still 0/1, video 0=no_change/1=start/2=stop
+  const videoCode = { 'no_change': 0, 'start': 1, 'stop': 2 };
+  waypoints.forEach((wp, i) => {
+    wpDefaults(wp);
+    rows.push([
+      i + 1,
+      wp.lat.toFixed(7),
+      wp.lng.toFixed(7),
+      wp.altitude !== null ? wp.altitude : '',
+      wp.still ? 1 : 0,
+      videoCode[wp.video] ?? 0
+    ].join(','));
+  });
   const base = sanitiseFilename(getRouteName());
   const filename = resolveFilename(base, 'csv');
   saveRouteFile(rows.join('\n'), 'Routes', filename);
@@ -795,11 +861,18 @@ document.getElementById('load-input').onchange = function() {
     let loaded = [];
     try {
       if (file.name.endsWith('.csv')) {
+        const videoDecode = ['no_change', 'start', 'stop'];
         text.trim().split('\n').slice(1).forEach(line => {
           const p = line.split(',');
           if (p.length >= 3) {
             const lat = parseFloat(p[1]), lng = parseFloat(p[2]);
-            if (!isNaN(lat) && !isNaN(lng)) loaded.push({ lat, lng });
+            if (!isNaN(lat) && !isNaN(lng)) {
+              const wp = L.latLng(lat, lng);
+              wp.altitude = (p[3] !== undefined && p[3].trim() !== '') ? parseFloat(p[3]) : null;
+              wp.still    = p[4] !== undefined ? p[4].trim() === '1' : false;
+              wp.video    = p[5] !== undefined ? (videoDecode[parseInt(p[5])] || 'no_change') : 'no_change';
+              loaded.push(wp);
+            }
           }
         });
       } else if (file.name.endsWith('.kml')) {
@@ -822,7 +895,11 @@ document.getElementById('load-input').onchange = function() {
       }
     } catch(err) { setStatus('Error reading file: ' + err.message); return; }
     if (!loaded.length) { setStatus('No valid waypoints found in file.'); return; }
-    waypoints = loaded.map(p => L.latLng(p.lat, p.lng));
+    // CSV load already produces L.LatLng with attributes; KML/GeoJSON produce plain objects.
+    waypoints = loaded.map(p => {
+      const wp = (p instanceof L.LatLng) ? p : L.latLng(p.lat, p.lng);
+      return wpDefaults(wp);
+    });
     // Set route name from filename (strip extension)
     setRouteName(file.name.replace(/\.[^.]+$/, ''));
     invalidateTerrainGrid();
@@ -1329,7 +1406,12 @@ function openFpvWindow() {
   window._fpvData = {
     grid:        _terrainGrid,
     profile:     _lastProfile,
-    waypoints:   waypoints.map(w => ({ lat: w.lat, lng: w.lng })),
+    waypoints:   waypoints.map(w => ({
+      lat: w.lat, lng: w.lng,
+      altitude: w.altitude ?? null,
+      still:    w.still    ?? false,
+      video:    w.video    ?? 'no_change',
+    })),
     terrainMode: getFpvTerrainMode(),
     osmZoom:     getFpvOsmZoom(),
     altMode:     'ruleb',
@@ -1454,29 +1536,6 @@ document.getElementById('btn-layout').onclick = function() {
   if (profileChart) profileChart.resize();
 };
 
-// ── FPV remote commands ────────────────────────────────────────────────────
-// Send a command object to the open FPV popup via window._fpvCmd.
-// fpv.html polls window._fpvCmd on each animation frame and clears it after
-// handling.  Safe to call even if FPV is not open — the popup check guards it.
-
-function fpvSendCmd(cmd) {
-  if (_fpvPopup && !_fpvPopup.closed) {
-    _fpvPopup._fpvCmd = cmd;
-  }
-}
-
-// Jump to the sample index for waypoint wpIndex, take a still there.
-function fpvGoAndStill(wpIndex) {
-  fpvSendCmd({ type: 'still', wpIndex });
-  setStatus('FPV: taking still at WP' + (wpIndex + 1) + '…');
-}
-
-// Jump to waypoint and start/stop recording.
-function fpvGoAndRecord(wpIndex, action) {
-  fpvSendCmd({ type: 'record', wpIndex, action });
-  setStatus('FPV: ' + (action === 'start' ? 'starting' : 'stopping') + ' recording at WP' + (wpIndex + 1) + '…');
-}
-
 // ── Context menu ─────────────────────────────────────────────────────────────
 // Shared right-click menu for map and profile chart.
 //
@@ -1595,23 +1654,43 @@ function showWaypointMenu(pageX, pageY, wpIndex, clickedLatlng) {
     }
   });
 
-  // FPV actions — only shown when the FPV window is open
-  const fpv = _fpvPopup && !_fpvPopup.closed ? _fpvPopup : null;
-  if (fpv) {
-    items.push({ type: 'sep' });
+  // ── Waypoint action attributes ──
+  const wp = waypoints[wpIndex];
+  wpDefaults(wp);
+  items.push({ type: 'sep' });
+
+  // Still toggle
+  items.push({
+    type: 'item',
+    icon: wp.still ? '📷' : '○',
+    label: wp.still ? 'Still: ON — click to remove' : 'Still: off — click to enable',
+    action: () => {
+      wp.still = !wp.still;
+      refreshMarkerAt(wpIndex);
+      setStatus('WP' + n + ' still ' + (wp.still ? 'enabled' : 'disabled') + '.');
+    }
+  });
+
+  // Video: three options, current one marked
+  const videoOpts = [
+    { val: 'no_change', icon: '—', label: 'Video: no change' },
+    { val: 'start',     icon: '⏺', label: 'Video: start recording' },
+    { val: 'stop',      icon: '⏹', label: 'Video: stop recording'  },
+  ];
+  videoOpts.forEach(opt => {
+    const active = wp.video === opt.val;
     items.push({
-      type: 'item', icon: '📷', label: 'FPV: Take still at WP' + n,
-      action: () => fpvGoAndStill(wpIndex)
+      type: 'item',
+      icon: active ? '✓' : opt.icon,
+      label: opt.label + (active ? ' ✓' : ''),
+      action: () => {
+        if (active) return;   // already set — no change needed
+        wp.video = opt.val;
+        refreshMarkerAt(wpIndex);
+        setStatus('WP' + n + ' video set to ' + opt.val + '.');
+      }
     });
-    items.push({
-      type: 'item', icon: '⏺', label: 'FPV: Start recording at WP' + n,
-      action: () => fpvGoAndRecord(wpIndex, 'start')
-    });
-    items.push({
-      type: 'item', icon: '⏹', label: 'FPV: Stop recording at WP' + n,
-      action: () => fpvGoAndRecord(wpIndex, 'stop')
-    });
-  }
+  });
   showCtxMenu(pageX, pageY, items);
 }
 
