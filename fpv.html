@@ -1,19 +1,25 @@
-<!-- FPV View v2.21 -->
+<!-- FPV View v2.22 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>FPV View — Drone Route Planner</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#111; color:#eee; font-family:system-ui,sans-serif;
-       display:flex; flex-direction:column; height:100vh; overflow:hidden; }
-#canvas-wrap { flex:1; position:relative; overflow:hidden; }
+       display:flex; flex-direction:column;
+       height:100vh;          /* fallback for older browsers */
+       height:100dvh;         /* dynamic viewport height — correct on iOS Safari */
+       overflow:hidden; }
+#canvas-wrap { flex:1; position:relative; overflow:hidden; min-height:0; }
 canvas { display:block; width:100%!important; height:100%!important; }
 #controls {
   background:#1a1a1a; border-top:1px solid #333;
   padding:6px 12px; display:flex; align-items:center; gap:8px;
   flex-shrink:0;
+  /* Clear the home indicator on iPad/iPhone */
+  padding-bottom:max(6px, env(safe-area-inset-bottom));
 }
 .ctl-btn {
   background:#2a2a2a; border:1px solid #444; color:#ddd;
